@@ -1,0 +1,25 @@
+name: Basic checks
+
+on:
+  pull_request:
+    branches:
+      - master
+  release:
+    types:
+      - published
+
+jobs:
+  runner-checks:
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v2
+      - name: Build
+        run: cargo build --locked --all-targets --all-features
+      - name: Test
+        run: cargo test --locked --all-targets --all-features
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- --no-deps -D warnings
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Docs
+        run: cargo doc --locked --document-private-items --no-deps
