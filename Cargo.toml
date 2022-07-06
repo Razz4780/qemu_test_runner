@@ -1,0 +1,11 @@
+[package]
+name = "qemu_test_runner"
+version = "0.1.0"
+edition = "2021"
+authors = ["Michał Smolarek <ms383396@students.mimuw.edu.pl>"]
+description = "A test runner for students' solutions to the Operating Systems course assignments."
+readme = "README.md"
+repository = "https://github.com/Razz4780/qemu_test_runner"
+license = "WTFPL"
+
+[dependencies]
