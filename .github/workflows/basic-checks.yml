@@ -1,15 +1,10 @@
 name: Basic checks
 
-on:
-  pull_request:
-    branches:
-      - master
-  release:
-    types:
-      - published
+on: [push, pull_request]
 
 jobs:
   runner-checks:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout current branch
         uses: actions/checkout@v2
