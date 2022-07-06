@@ -9,3 +9,4 @@ repository = "https://github.com/Razz4780/qemu_test_runner"
 license = "WTFPL"
 
 [dependencies]
+portpicker = "0.1.1"
