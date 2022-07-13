@@ -1,6 +1,7 @@
-use crate::{qemu::Instance, ssh::Controller, Timeout};
+use crate::{qemu::Instance, ssh::Controller, CanFail, Timeout};
 use std::{
     cmp,
+    ffi::OsString,
     io::Result,
     net::SocketAddr,
     os::unix::prelude::ExitStatusExt,
@@ -10,25 +11,7 @@ use std::{
     time::Duration,
 };
 
-trait CanFail {
-    fn failed(&self) -> bool;
-}
-
-impl CanFail for Result<Output> {
-    fn failed(&self) -> bool {
-        self.as_ref()
-            .map(|output| !output.status.success())
-            .unwrap_or(true)
-    }
-}
-
-impl CanFail for Result<()> {
-    fn failed(&self) -> bool {
-        self.is_err()
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Action {
     Send {
         local: PathBuf,
@@ -53,14 +36,15 @@ pub struct Config {
 
 #[derive(Debug)]
 pub struct ExecutionReport {
+    pub image_path: OsString,
     pub qemu: Result<Output>,
     pub connect: Result<()>,
     pub actions: Vec<(Action, Result<Output>)>,
     pub poweroff: Option<Result<Output>>,
 }
 
-impl ExecutionReport {
-    pub fn failed(&self) -> bool {
+impl CanFail for ExecutionReport {
+    fn failed(&self) -> bool {
         self.qemu.failed()
             || self.connect.failed()
             || self.actions.iter().any(|(_, res)| res.failed())
@@ -111,10 +95,13 @@ impl Executor {
     }
 
     pub fn run(self, actions: Vec<Action>) -> ExecutionReport {
+        let image_path = self.qemu.as_ref().unwrap().image().into();
+
         let mut controller = match self.controller() {
             Ok(controller) => controller,
             Err(e) => {
                 return ExecutionReport {
+                    image_path,
                     qemu: self.kill_qemu(),
                     connect: Err(e),
                     actions: Default::default(),
@@ -158,6 +145,7 @@ impl Executor {
         };
 
         ExecutionReport {
+            image_path,
             qemu,
             connect: Ok(()),
             actions: results,
