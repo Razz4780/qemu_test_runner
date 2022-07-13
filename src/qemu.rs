@@ -180,7 +180,7 @@ where
     S: AsRef<OsStr>,
 {
     /// Spawns a QEMU instance running the given `image`.
-    pub fn spawn(&self, image: &str) -> Result<Child> {
+    pub fn spawn(&self, image: &str) -> Result<Instance> {
         let mut cmd = Command::new(self.cmd.as_ref());
         cmd.arg("-nographic")
             .arg("-drive")
@@ -216,7 +216,9 @@ where
             .stdout(Stdio::piped())
             .stdin(Stdio::null());
 
-        cmd.spawn()
+        let child = cmd.spawn()?;
+
+        Ok(Instance { child: Some(child) })
     }
 }
 
