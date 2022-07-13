@@ -2,7 +2,7 @@ use std::{
     ffi::OsStr,
     fmt::{self, Display, Formatter},
     io::Result,
-    process::{Child, Command, Output, Stdio, ExitStatus},
+    process::{Child, Command, ExitStatus, Output, Stdio},
 };
 
 /// A command for building QEMU images.
