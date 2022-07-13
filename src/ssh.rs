@@ -1,46 +1,16 @@
+use crate::Timeout;
 use ssh2::Session;
 use std::{
+    cmp,
     fs::File,
-    io::{self, ErrorKind, Read, Result},
+    io::{self, Read, Result},
     net::{SocketAddr, TcpStream},
     os::unix::prelude::ExitStatusExt,
     path::Path,
     process::{ExitStatus, Output},
-    time::{Duration, Instant},
+    thread,
+    time::Duration,
 };
-
-struct Timeout {
-    start: Instant,
-    duration: Duration,
-}
-
-impl Timeout {
-    fn new(duration: Duration) -> Self {
-        Self {
-            start: Instant::now(),
-            duration,
-        }
-    }
-
-    fn remaining(&self) -> Result<Duration> {
-        let elapsed = self.start.elapsed();
-        let remaining = self.duration.checked_sub(elapsed);
-
-        match remaining {
-            Some(r) if r > Duration::ZERO => Ok(r),
-            _ => Err(ErrorKind::TimedOut.into()),
-        }
-    }
-
-    fn remaining_ms(&self) -> Result<u32> {
-        let remaining = self.remaining()?.as_millis();
-        if remaining > 0 {
-            Ok(remaining.try_into().unwrap_or(u32::MAX))
-        } else {
-            Err(ErrorKind::TimedOut.into())
-        }
-    }
-}
 
 pub struct Controller {
     session: Session,
@@ -48,6 +18,23 @@ pub struct Controller {
 
 impl Controller {
     pub fn new(
+        addr: SocketAddr,
+        username: &str,
+        password: &str,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let timeout = Timeout::new(timeout);
+
+        loop {
+            let res = Self::try_new(addr, username, password, timeout.remaining()?);
+            if res.is_ok() {
+                break res;
+            }
+            thread::sleep(cmp::min(Duration::from_secs(1), timeout.remaining()?));
+        }
+    }
+
+    fn try_new(
         addr: SocketAddr,
         username: &str,
         password: &str,
