@@ -10,3 +10,4 @@ license = "WTFPL"
 
 [dependencies]
 portpicker = "0.1.1"
+ssh2 = "0.9.3"
