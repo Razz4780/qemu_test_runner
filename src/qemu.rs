@@ -2,7 +2,7 @@ use std::{
     ffi::OsStr,
     fmt::{self, Display, Formatter},
     io::Result,
-    process::{Child, Command, Output},
+    process::{Child, Command, Output, Stdio, ExitStatus},
 };
 
 /// A command for building QEMU images.
@@ -212,6 +212,36 @@ where
             cmd.arg("-net").arg(arg);
         }
 
+        cmd.stderr(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stdin(Stdio::null());
+
         cmd.spawn()
+    }
+}
+
+pub struct Instance {
+    child: Option<Child>,
+}
+
+impl Instance {
+    pub fn kill(&mut self) -> Result<()> {
+        self.child.as_mut().unwrap().kill()
+    }
+
+    pub fn wait(mut self) -> Result<Output> {
+        self.child.take().unwrap().wait_with_output()
+    }
+
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+        self.child.as_mut().unwrap().try_wait()
+    }
+}
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            child.kill().ok();
+        }
     }
 }
