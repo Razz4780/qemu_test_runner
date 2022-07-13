@@ -2,7 +2,7 @@ use std::{
     ffi::OsStr,
     fmt::{self, Display, Formatter},
     io::Result,
-    process::{Child, Command, Output},
+    process::{Child, Command, ExitStatus, Output, Stdio},
 };
 
 /// A command for building QEMU images.
@@ -180,7 +180,7 @@ where
     S: AsRef<OsStr>,
 {
     /// Spawns a QEMU instance running the given `image`.
-    pub fn spawn(&self, image: &str) -> Result<Child> {
+    pub fn spawn(&self, image: &str) -> Result<Instance> {
         let mut cmd = Command::new(self.cmd.as_ref());
         cmd.arg("-nographic")
             .arg("-drive")
@@ -212,6 +212,38 @@ where
             cmd.arg("-net").arg(arg);
         }
 
-        cmd.spawn()
+        cmd.stderr(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stdin(Stdio::null());
+
+        let child = cmd.spawn()?;
+
+        Ok(Instance { child: Some(child) })
+    }
+}
+
+pub struct Instance {
+    child: Option<Child>,
+}
+
+impl Instance {
+    pub fn kill(&mut self) -> Result<()> {
+        self.child.as_mut().unwrap().kill()
+    }
+
+    pub fn wait(mut self) -> Result<Output> {
+        self.child.take().unwrap().wait_with_output()
+    }
+
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+        self.child.as_mut().unwrap().try_wait()
+    }
+}
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            child.kill().ok();
+        }
     }
 }
