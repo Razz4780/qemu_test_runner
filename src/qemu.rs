@@ -1,5 +1,5 @@
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fmt::{self, Display, Formatter},
     io::Result,
     process::{Child, Command, ExitStatus, Output, Stdio},
@@ -32,7 +32,11 @@ where
     S: AsRef<OsStr>,
 {
     /// Creates a new qcow2 image located at `dst` and backed by `src`.
-    pub fn qcow2(&self, src: &str, dst: &str) -> Result<Output> {
+    pub fn qcow2(&self, src: &OsStr, dst: &OsStr) -> Result<Output> {
+        let mut image = OsString::new();
+        image.push("backing_file=");
+        image.push(src);
+
         Command::new(self.cmd.as_ref())
             .arg("create")
             .arg("-f")
@@ -40,7 +44,7 @@ where
             .arg("-F")
             .arg("raw")
             .arg("-o")
-            .arg(format!("backing_file={}", src))
+            .arg(image)
             .arg(dst)
             .output()
     }
@@ -180,11 +184,15 @@ where
     S: AsRef<OsStr>,
 {
     /// Spawns a QEMU instance running the given `image`.
-    pub fn spawn(&self, image: &str) -> Result<Instance> {
+    pub fn spawn(&self, image: &OsStr) -> Result<Instance> {
+        let mut drive = OsString::new();
+        drive.push("file=");
+        drive.push(image);
+
         let mut cmd = Command::new(self.cmd.as_ref());
         cmd.arg("-nographic")
             .arg("-drive")
-            .arg(format!("file={}", image))
+            .arg(drive)
             .arg("-rtc")
             .arg("base=localtime")
             .arg("-net")
@@ -218,15 +226,23 @@ where
 
         let child = cmd.spawn()?;
 
-        Ok(Instance { child: Some(child) })
+        Ok(Instance {
+            child: Some(child),
+            image: image.into(),
+        })
     }
 }
 
 pub struct Instance {
     child: Option<Child>,
+    image: OsString,
 }
 
 impl Instance {
+    pub fn image(&self) -> &OsStr {
+        &self.image
+    }
+
     pub fn kill(&mut self) -> Result<()> {
         self.child.as_mut().unwrap().kill()
     }
@@ -244,6 +260,7 @@ impl Drop for Instance {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
+            child.wait().ok();
         }
     }
 }

@@ -82,24 +82,20 @@ impl Controller {
         })
     }
 
-    pub fn send<P1, P2>(
+    pub fn send(
         &mut self,
-        local: P1,
-        remote: P2,
+        local: &Path,
+        remote: &Path,
         mode: i32,
         timeout: Duration,
-    ) -> Result<()>
-    where
-        P1: AsRef<Path>,
-        P2: AsRef<Path>,
-    {
+    ) -> Result<()> {
         let timeout = Timeout::new(timeout);
 
-        let mut file = File::open(local.as_ref())?;
+        let mut file = File::open(local)?;
         let size = file.metadata()?.len();
 
         self.session.set_timeout(timeout.remaining_ms()?);
-        let mut remote_file = self.session.scp_send(remote.as_ref(), mode, size, None)?;
+        let mut remote_file = self.session.scp_send(remote, mode, size, None)?;
         self.session.set_timeout(timeout.remaining_ms()?);
         io::copy(&mut file, &mut remote_file)?;
 

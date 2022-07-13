@@ -1,10 +1,12 @@
 use std::{
     io::{ErrorKind, Result},
+    process::Output,
     time::{Duration, Instant},
 };
 
 pub mod executor;
 pub mod qemu;
+pub mod runner;
 pub mod ssh;
 
 pub struct Timeout {
@@ -37,5 +39,39 @@ impl Timeout {
         } else {
             Err(ErrorKind::TimedOut.into())
         }
+    }
+}
+
+pub trait CanFail {
+    fn failed(&self) -> bool;
+}
+
+impl CanFail for () {
+    fn failed(&self) -> bool {
+        false
+    }
+}
+
+impl CanFail for Output {
+    fn failed(&self) -> bool {
+        !self.status.success()
+    }
+}
+
+impl<C> CanFail for Result<C>
+where
+    C: CanFail,
+{
+    fn failed(&self) -> bool {
+        self.as_ref().map(|res| res.failed()).unwrap_or(true)
+    }
+}
+
+impl<C> CanFail for Vec<C>
+where
+    C: CanFail,
+{
+    fn failed(&self) -> bool {
+        self.last().map(CanFail::failed).unwrap_or(false)
     }
 }
