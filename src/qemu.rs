@@ -1,43 +1,34 @@
 use std::{
     ffi::{OsStr, OsString},
-    fmt::{self, Display, Formatter},
-    io::Result,
-    process::{Child, Command, ExitStatus, Output, Stdio},
+    io::{Error, ErrorKind, Result},
+    net::{Ipv4Addr, SocketAddr},
+    os::unix::process::ExitStatusExt,
+    process::{ExitStatus, Output, Stdio},
+    sync::Arc,
+};
+use tokio::{
+    process::{Child, Command},
+    sync::{OwnedSemaphorePermit, Semaphore},
+    task,
 };
 
-/// A command for building QEMU images.
-pub struct Build<S> {
+pub struct ImageBuilder {
     /// Command invoked to create a new image.
-    cmd: S,
+    cmd: OsString,
 }
 
-impl Default for Build<&'static str> {
-    /// Creates a new instance of this struct.
-    /// The instance will use `qemu-img` to create images.
-    fn default() -> Self {
-        Self { cmd: "qemu-img" }
+impl ImageBuilder {
+    pub fn new(cmd: OsString) -> Self {
+        Self { cmd }
     }
-}
 
-impl<S> Build<S> {
-    /// Sets the command invoked by this struct to create a new image.
-    pub fn cmd(&mut self, cmd: S) -> &mut Self {
-        self.cmd = cmd;
-        self
-    }
-}
-
-impl<S> Build<S>
-where
-    S: AsRef<OsStr>,
-{
     /// Creates a new qcow2 image located at `dst` and backed by `src`.
-    pub fn qcow2(&self, src: &OsStr, dst: &OsStr) -> Result<Output> {
+    pub async fn qcow2(&self, src: &OsStr, dst: &OsStr) -> Result<()> {
         let mut image = OsString::new();
         image.push("backing_file=");
         image.push(src);
 
-        Command::new(self.cmd.as_ref())
+        let output = Command::new(&self.cmd)
             .arg("create")
             .arg("-f")
             .arg("qcow2")
@@ -47,208 +38,38 @@ where
             .arg(image)
             .arg(dst)
             .output()
-    }
-}
+            .await?;
 
-/// An internet protocol for port forwarding.
-pub enum Protocol {
-    Tcp,
-    Udp,
-}
-
-impl Display for Protocol {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Tcp => f.write_str("tcp"),
-            Self::Udp => f.write_str("udp"),
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(Error::from_raw_os_error(output.status.into_raw()))
         }
     }
 }
 
-/// A direction for port forwarding.
-pub enum Direction {
-    /// Forwarding from a host port to a guest port.
-    Hostfwd,
-    /// Forwarding from a guest port to a host port.
-    Guestfwd,
-}
-
-impl Display for Direction {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Hostfwd => f.write_str("hostfwd"),
-            Self::Guestfwd => f.write_str("guestfwd"),
-        }
-    }
-}
-
-/// A port forwarding rule.
-pub struct Forward {
-    /// Internet protocol.
-    pub protocol: Protocol,
-    /// Forward direction.
-    pub direction: Direction,
-    /// Port to forward from.
-    pub from: u16,
-    /// Port to forward to.
-    pub to: u16,
-}
-
-impl Forward {
-    /// Creates a new instance of this struct.
-    /// The instance will represent a forwarding rule with:
-    /// * protocol = [Protocol::Tcp],
-    /// * direction = [Direction::Hostfwd],
-    /// * from = a random unused port,
-    /// * to = 22.
-    /// This should enable connecting to the running instance with SSH.
-    /// Returns [None] when no unused port can be found.
-    pub fn new_ssh() -> Option<Self> {
-        let port = portpicker::pick_unused_port()?;
-        Some(Self {
-            protocol: Protocol::Tcp,
-            direction: Direction::Hostfwd,
-            from: port,
-            to: 22,
-        })
-    }
-}
-
-/// A command for running QEMU images.
-pub struct Run<S> {
-    /// Command invoked to run an image.
-    cmd: S,
-    /// Memory available to the image (megabytes).
-    memory: u16,
-    /// Whether to use kvm or not.
-    enable_kvm: bool,
-    /// Port forwarding rules.
-    forwards: Vec<Forward>,
-    /// Whether do turn off the kernel irqchip.
-    irqchip_off: bool,
-}
-
-impl Default for Run<&'static str> {
-    /// Creates a new instance of this struct.
-    /// The instance will:
-    /// * use `qemu-system-x86_64` command to run images,
-    /// * set the available memory to 1024M,
-    /// * enable kvm,
-    /// * not forward any port,
-    /// * turn off the kernel irqchip.
-    fn default() -> Self {
-        Self {
-            cmd: "qemu-system-x86_64",
-            memory: 1024,
-            enable_kvm: true,
-            forwards: Default::default(),
-            irqchip_off: true,
-        }
-    }
-}
-
-impl<S> Run<S> {
-    /// Sets the command invoked by this struct to run an image.
-    pub fn cmd(&mut self, cmd: S) -> &mut Self {
-        self.cmd = cmd;
-        self
-    }
-
-    /// Sets the available memory.
-    pub fn memory(&mut self, memory: u16) -> &mut Self {
-        self.memory = memory;
-        self
-    }
-
-    /// Enables or disables kvm.
-    pub fn kvm(&mut self, enabled: bool) -> &mut Self {
-        self.enable_kvm = enabled;
-        self
-    }
-
-    /// Adds a port forward rule.
-    pub fn forward(&mut self, forward: Forward) -> &mut Self {
-        self.forwards.push(forward);
-        self
-    }
-
-    /// Turns the kernel irqchip off or on.
-    pub fn irqchip(&mut self, off: bool) -> &mut Self {
-        self.irqchip_off = off;
-        self
-    }
-}
-
-impl<S> Run<S>
-where
-    S: AsRef<OsStr>,
-{
-    /// Spawns a QEMU instance running the given `image`.
-    pub fn spawn(&self, image: &OsStr) -> Result<Instance> {
-        let mut drive = OsString::new();
-        drive.push("file=");
-        drive.push(image);
-
-        let mut cmd = Command::new(self.cmd.as_ref());
-        cmd.arg("-nographic")
-            .arg("-drive")
-            .arg(drive)
-            .arg("-rtc")
-            .arg("base=localtime")
-            .arg("-net")
-            .arg("nic,model=virtio")
-            .arg("-m")
-            .arg(format!("{}M", self.memory));
-        if self.enable_kvm {
-            cmd.arg("-enable-kvm");
-        }
-        if self.irqchip_off {
-            cmd.arg("-machine").arg("kernel_irqchip=off");
-        }
-        if !self.forwards.is_empty() {
-            let forwards = self.forwards.iter().map(|forward| {
-                format!(
-                    "{}={}::{}-:{}",
-                    forward.direction, forward.protocol, forward.from, forward.to
-                )
-            });
-            let arg = ["user".to_string()]
-                .into_iter()
-                .chain(forwards)
-                .collect::<Vec<_>>()
-                .join(",");
-            cmd.arg("-net").arg(arg);
-        }
-
-        cmd.stderr(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stdin(Stdio::null());
-
-        let child = cmd.spawn()?;
-
-        Ok(Instance {
-            child: Some(child),
-            image: image.into(),
-        })
-    }
-}
-
-pub struct Instance {
+pub struct QemuInstance {
     child: Option<Child>,
-    image: OsString,
+    permit: Option<OwnedSemaphorePermit>,
+    image_path: OsString,
+    ssh_port: u16,
 }
 
-impl Instance {
-    pub fn image(&self) -> &OsStr {
-        &self.image
+impl QemuInstance {
+    pub fn ssh(&self) -> SocketAddr {
+        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), self.ssh_port)
     }
 
-    pub fn kill(&mut self) -> Result<()> {
-        self.child.as_mut().unwrap().kill()
+    pub fn image_path(&self) -> &OsStr {
+        &self.image_path
     }
 
-    pub fn wait(mut self) -> Result<Output> {
-        self.child.take().unwrap().wait_with_output()
+    pub async fn kill(&mut self) -> Result<()> {
+        self.child.as_mut().unwrap().kill().await
+    }
+
+    pub async fn wait(mut self) -> Result<Output> {
+        self.child.take().unwrap().wait_with_output().await
     }
 
     pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
@@ -256,11 +77,81 @@ impl Instance {
     }
 }
 
-impl Drop for Instance {
+impl Drop for QemuInstance {
     fn drop(&mut self) {
+        let permit = self.permit.take();
         if let Some(mut child) = self.child.take() {
-            child.kill().ok();
-            child.wait().ok();
+            child.start_kill().ok();
+            task::spawn(async move {
+                let _permit = permit;
+                child.wait().await.ok();
+            });
         }
+    }
+}
+
+pub struct QemuConfig {
+    pub cmd: OsString,
+    pub memory: u16,
+    pub enable_kvm: bool,
+    pub irqchip_off: bool,
+}
+
+pub struct QemuSpawner {
+    permits: Arc<Semaphore>,
+    config: QemuConfig,
+}
+
+impl QemuSpawner {
+    fn setup_cmd(&self, image_path: &OsStr, ssh_port: u16) -> Command {
+        let mut drive = OsString::new();
+        drive.push("file=");
+        drive.push(image_path);
+
+        let mut cmd = Command::new(&self.config.cmd);
+        cmd.arg("-nographic")
+            .arg("-drive")
+            .arg(drive)
+            .arg("-rtc")
+            .arg("base=localtime")
+            .arg("-net")
+            .arg("nic,model=virtio")
+            .arg("-net")
+            .arg(format!("user,hostfwd=tcp::{}-:22", ssh_port))
+            .arg("-m")
+            .arg(format!("{}M", self.config.memory));
+
+        if self.config.enable_kvm {
+            cmd.arg("-enable-kvm");
+        }
+
+        if self.config.irqchip_off {
+            cmd.arg("-machine").arg("kernel_irqchip=off");
+        }
+
+        cmd.stderr(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stdin(Stdio::null());
+
+        cmd
+    }
+
+    pub async fn spawn(&self, image_path: OsString) -> Result<QemuInstance> {
+        let ssh_port = portpicker::pick_unused_port()
+            .ok_or_else(|| Error::new(ErrorKind::Other, "no free port"))?;
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore should not be closed");
+        let child = self.setup_cmd(&image_path, ssh_port).spawn()?;
+
+        Ok(QemuInstance {
+            child: Some(child),
+            permit: Some(permit),
+            image_path,
+            ssh_port,
+        })
     }
 }

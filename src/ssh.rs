@@ -1,47 +1,48 @@
-use crate::Timeout;
+use crate::{CanFail, Result, Timeout};
 use ssh2::Session;
 use std::{
-    cmp,
     fs::File,
-    io::{self, Read, Result},
+    io::{self, Read},
     net::{SocketAddr, TcpStream},
     os::unix::prelude::ExitStatusExt,
-    path::Path,
+    path::{Path, PathBuf},
     process::{ExitStatus, Output},
     thread,
     time::Duration,
 };
+use tokio::{
+    sync::{mpsc, oneshot},
+    task,
+};
 
-pub struct Controller {
-    session: Session,
+#[derive(Debug)]
+enum SshCommand {
+    Exec {
+        cmd: String,
+        timeout: Duration,
+        tx: oneshot::Sender<Result<Output>>,
+    },
+    Send {
+        local: PathBuf,
+        remote: PathBuf,
+        mode: i32,
+        timeout: Duration,
+        tx: oneshot::Sender<io::Result<()>>,
+    },
 }
 
-impl Controller {
-    pub fn new(
+struct SshWorker {
+    session: Session,
+    receiver: mpsc::Receiver<SshCommand>,
+}
+
+impl SshWorker {
+    fn open_session(
         addr: SocketAddr,
         username: &str,
         password: &str,
-        timeout: Duration,
-    ) -> Result<Self> {
-        let timeout = Timeout::new(timeout);
-
-        loop {
-            let res = Self::try_new(addr, username, password, timeout.remaining()?);
-            if res.is_ok() {
-                break res;
-            }
-            thread::sleep(cmp::min(Duration::from_secs(1), timeout.remaining()?));
-        }
-    }
-
-    fn try_new(
-        addr: SocketAddr,
-        username: &str,
-        password: &str,
-        timeout: Duration,
-    ) -> Result<Self> {
-        let timeout = Timeout::new(timeout);
-
+        timeout: &Timeout,
+    ) -> io::Result<Session> {
         let conn = TcpStream::connect_timeout(&addr, timeout.remaining()?)?;
 
         let mut session = Session::new()?;
@@ -51,16 +52,59 @@ impl Controller {
         session.set_timeout(timeout.remaining_ms()?);
         session.userauth_password(username, password)?;
 
-        Ok(Self { session })
+        Ok(session)
     }
 
-    pub fn exec(&mut self, cmd: &str, timeout: Duration) -> Result<Output> {
+    async fn new(
+        addr: SocketAddr,
+        username: String,
+        password: String,
+        timeout: Duration,
+        receiver: mpsc::Receiver<SshCommand>,
+    ) -> io::Result<Self> {
+        let open = move || -> io::Result<Session> {
+            let timeout = Timeout::new(timeout);
+            loop {
+                let res = Self::open_session(addr, &username, &password, &timeout);
+                if res.is_ok() {
+                    break res;
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
+        };
+        let session = task::spawn_blocking(open).await.unwrap()?;
+
+        Ok(Self { session, receiver })
+    }
+
+    fn run(mut self) {
+        while let Some(command) = self.receiver.blocking_recv() {
+            match command {
+                SshCommand::Exec { cmd, timeout, tx } => {
+                    let res = self.exec(&cmd, timeout);
+                    tx.send(res).ok();
+                }
+                SshCommand::Send {
+                    local,
+                    remote,
+                    mode,
+                    timeout,
+                    tx,
+                } => {
+                    let res = self.send(&local, &remote, mode, timeout);
+                    tx.send(res).ok();
+                }
+            }
+        }
+    }
+
+    fn exec(&mut self, cmd: &str, timeout: Duration) -> Result<Output> {
         let timeout = Timeout::new(timeout);
 
         self.session.set_timeout(timeout.remaining_ms()?);
         let mut channel = self.session.channel_session()?;
         self.session.set_timeout(timeout.remaining_ms()?);
-        channel.exec(cmd)?;
+        channel.exec(cmd).map_err(io::Error::from)?;
 
         let mut stdout = Vec::new();
         self.session.set_timeout(timeout.remaining_ms()?);
@@ -82,13 +126,13 @@ impl Controller {
         })
     }
 
-    pub fn send(
+    fn send(
         &mut self,
         local: &Path,
         remote: &Path,
         mode: i32,
         timeout: Duration,
-    ) -> Result<()> {
+    ) -> io::Result<()> {
         let timeout = Timeout::new(timeout);
 
         let mut file = File::open(local)?;
@@ -109,5 +153,59 @@ impl Controller {
         remote_file.wait_close()?;
 
         Ok(())
+    }
+}
+
+pub struct SshHandle {
+    sender: mpsc::Sender<SshCommand>,
+}
+
+impl SshHandle {
+    pub async fn new(
+        addr: SocketAddr,
+        username: String,
+        password: String,
+        timeout: Duration,
+    ) -> io::Result<Self> {
+        let (tx, rx) = mpsc::channel(1);
+
+        let worker = SshWorker::new(addr, username, password, timeout, rx).await?;
+        task::spawn_blocking(move || worker.run());
+
+        Ok(Self { sender: tx })
+    }
+
+    pub async fn exec(&mut self, cmd: String, timeout: Duration) -> Result<Output> {
+        let (tx, rx) = oneshot::channel();
+
+        self.sender
+            .send(SshCommand::Exec { cmd, timeout, tx })
+            .await
+            .expect("ssh worker died");
+
+        rx.await.expect("ssh worker died")?.result()
+    }
+
+    pub async fn send(
+        &mut self,
+        local: PathBuf,
+        remote: PathBuf,
+        mode: i32,
+        timeout: Duration,
+    ) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+
+        self.sender
+            .send(SshCommand::Send {
+                local,
+                remote,
+                mode,
+                timeout,
+                tx,
+            })
+            .await
+            .expect("ssh worker died");
+
+        rx.await.expect("ssh worker died").map_err(Into::into)
     }
 }

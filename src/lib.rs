@@ -1,5 +1,6 @@
 use std::{
-    io::{ErrorKind, Result},
+    io::{self, ErrorKind},
+    os::unix::process::ExitStatusExt,
     process::Output,
     time::{Duration, Instant},
 };
@@ -22,7 +23,7 @@ impl Timeout {
         }
     }
 
-    pub fn remaining(&self) -> Result<Duration> {
+    pub fn remaining(&self) -> io::Result<Duration> {
         let elapsed = self.start.elapsed();
         let remaining = self.duration.checked_sub(elapsed);
 
@@ -32,7 +33,7 @@ impl Timeout {
         }
     }
 
-    fn remaining_ms(&self) -> Result<u32> {
+    fn remaining_ms(&self) -> io::Result<u32> {
         let remaining = self.remaining()?.as_millis();
         if remaining > 0 {
             Ok(remaining.try_into().unwrap_or(u32::MAX))
@@ -42,36 +43,46 @@ impl Timeout {
     }
 }
 
-pub trait CanFail {
-    fn failed(&self) -> bool;
+#[derive(Debug)]
+pub struct Error {
+    pub error: io::Error,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }
 
-impl CanFail for () {
-    fn failed(&self) -> bool {
-        false
+impl From<io::Error> for Error {
+    fn from(error: io::Error) -> Self {
+        Self {
+            error,
+            stdout: Default::default(),
+            stderr: Default::default(),
+        }
     }
+}
+
+impl From<ssh2::Error> for Error {
+    fn from(error: ssh2::Error) -> Self {
+        io::Error::from(error).into()
+    }
+}
+
+pub type Result<T> = core::result::Result<T, Error>;
+
+pub trait CanFail: Sized {
+    fn result(self) -> Result<Self>;
 }
 
 impl CanFail for Output {
-    fn failed(&self) -> bool {
-        !self.status.success()
-    }
-}
-
-impl<C> CanFail for Result<C>
-where
-    C: CanFail,
-{
-    fn failed(&self) -> bool {
-        self.as_ref().map(|res| res.failed()).unwrap_or(true)
-    }
-}
-
-impl<C> CanFail for Vec<C>
-where
-    C: CanFail,
-{
-    fn failed(&self) -> bool {
-        self.last().map(CanFail::failed).unwrap_or(false)
+    fn result(self) -> Result<Self> {
+        if self.status.success() {
+            Ok(self)
+        } else {
+            let error = io::Error::from_raw_os_error(self.status.into_raw());
+            Err(Error {
+                error,
+                stdout: self.stdout,
+                stderr: self.stderr,
+            })
+        }
     }
 }

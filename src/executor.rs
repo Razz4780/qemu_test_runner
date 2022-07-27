@@ -1,9 +1,6 @@
-use crate::{qemu::Instance, ssh::Controller, CanFail, Timeout};
+use crate::{qemu::QemuInstance, ssh::SshHandle, CanFail, Result, Timeout};
 use std::{
-    cmp,
-    ffi::OsString,
-    io::Result,
-    net::SocketAddr,
+    cmp, io,
     os::unix::prelude::ExitStatusExt,
     path::PathBuf,
     process::{ExitStatus, Output},
@@ -25,127 +22,116 @@ pub enum Action {
     },
 }
 
-pub struct Config {
-    pub ssh_addr: SocketAddr,
-    pub ssh_username: String,
-    pub ssh_password: String,
+pub struct ExecutionConfig {
+    pub user: String,
+    pub password: String,
+    pub actions: Vec<Action>,
     pub startup_timeout: Duration,
     pub poweroff_timeout: Duration,
-    pub poweroff_cmd: String,
+    pub poweroff_command: String,
 }
 
 #[derive(Debug)]
 pub struct ExecutionReport {
-    pub image_path: OsString,
     pub qemu: Result<Output>,
     pub connect: Result<()>,
-    pub actions: Vec<(Action, Result<Output>)>,
+    pub actions: Vec<Result<Output>>,
     pub poweroff: Option<Result<Output>>,
 }
 
-impl CanFail for ExecutionReport {
-    fn failed(&self) -> bool {
-        self.qemu.failed()
-            || self.connect.failed()
-            || self.actions.iter().any(|(_, res)| res.failed())
-    }
-}
-
 pub struct Executor {
-    qemu: Option<Instance>,
-    config: Config,
+    qemu: Option<QemuInstance>,
 }
 
 impl Executor {
-    pub fn new(qemu: Instance, config: Config) -> Self {
-        Self {
-            qemu: Some(qemu),
-            config,
-        }
+    pub fn new(qemu: QemuInstance) -> Self {
+        Self { qemu: Some(qemu) }
     }
 
-    fn controller(&self) -> Result<Controller> {
-        Controller::new(
-            self.config.ssh_addr,
-            &self.config.ssh_username,
-            &self.config.ssh_password,
-            self.config.startup_timeout,
+    async fn get_ssh_handle(&self, config: &ExecutionConfig) -> io::Result<SshHandle> {
+        let ssh_addr = self.qemu.as_ref().unwrap().ssh();
+        SshHandle::new(
+            ssh_addr,
+            config.user.clone(),
+            config.password.clone(),
+            config.startup_timeout,
         )
+        .await
     }
 
-    fn kill_qemu(mut self) -> Result<Output> {
+    async fn kill_qemu(mut self) -> Result<Output> {
         let mut qemu = self.qemu.take().unwrap();
-        qemu.kill().ok();
-        qemu.wait()
+        qemu.kill().await.ok();
+        qemu.wait().await?.result()
     }
 
-    fn wait_qemu(mut self) -> Result<Output> {
-        let timeout = Timeout::new(self.config.poweroff_timeout);
+    async fn wait_qemu(mut self, timeout: Duration) -> Result<Output> {
+        let timeout = Timeout::new(timeout);
 
         loop {
             let exited = self.qemu.as_mut().unwrap().try_wait()?.is_some();
             if exited {
-                break self.qemu.take().unwrap().wait();
+                break self.qemu.take().unwrap().wait().await?.result();
             }
             match timeout.remaining() {
                 Ok(remaining) => thread::sleep(cmp::min(remaining, Duration::from_secs(1))),
-                Err(_) => break self.kill_qemu(),
+                Err(_) => break self.kill_qemu().await,
             }
         }
     }
 
-    pub fn run(self, actions: Vec<Action>) -> ExecutionReport {
-        let image_path = self.qemu.as_ref().unwrap().image().into();
-
-        let mut controller = match self.controller() {
-            Ok(controller) => controller,
+    pub async fn run(self, config: &ExecutionConfig) -> ExecutionReport {
+        let mut ssh = match self.get_ssh_handle(config).await {
+            Ok(ssh) => ssh,
             Err(e) => {
                 return ExecutionReport {
-                    image_path,
-                    qemu: self.kill_qemu(),
-                    connect: Err(e),
+                    qemu: self.kill_qemu().await,
+                    connect: Err(e.into()),
                     actions: Default::default(),
                     poweroff: None,
                 }
             }
         };
 
-        let mut results = Vec::with_capacity(actions.len());
-        let mut err = false;
-        for action in actions {
-            let res = match &action {
-                Action::Exec { cmd, timeout } => controller.exec(cmd, *timeout),
+        let mut results = Vec::with_capacity(config.actions.len());
+        for action in &config.actions {
+            let res = match action {
+                Action::Exec { cmd, timeout } => ssh.exec(cmd.clone(), *timeout).await,
                 Action::Send {
                     local,
                     remote,
                     mode,
                     timeout,
-                } => controller
-                    .send(local, remote, *mode, *timeout)
+                } => ssh
+                    .send(local.clone(), remote.clone(), *mode, *timeout)
+                    .await
                     .map(|_| Output {
                         status: ExitStatus::from_raw(0),
                         stdout: Default::default(),
                         stderr: Default::default(),
                     }),
             };
-            err = res.failed();
 
-            results.push((action, res));
-
-            if err {
+            results.push(res);
+            if results.last().unwrap().is_err() {
                 break;
             }
         }
 
-        let (qemu, poweroff) = if err {
-            (self.kill_qemu(), None)
+        let kill = results.last().map(Result::is_err).unwrap_or(false);
+        let (qemu, poweroff) = if kill {
+            (self.kill_qemu().await, None)
         } else {
-            let poweroff = controller.exec(&self.config.poweroff_cmd, self.config.poweroff_timeout);
-            (self.wait_qemu(), Some(poweroff))
+            let poweroff = ssh
+                .exec(config.poweroff_command.clone(), config.poweroff_timeout)
+                .await;
+            (
+                self.wait_qemu(config.poweroff_timeout).await,
+                Some(poweroff),
+            )
         };
 
         ExecutionReport {
-            image_path,
             qemu,
             connect: Ok(()),
             actions: results,
