@@ -1,6 +1,5 @@
 use std::{
     io::{self, ErrorKind},
-    os::unix::process::ExitStatusExt,
     process::Output,
     time::{Duration, Instant},
 };
@@ -10,12 +9,15 @@ pub mod qemu;
 pub mod runner;
 pub mod ssh;
 
+/// A struct for tracking a timeout between blocking function calls.
 pub struct Timeout {
     start: Instant,
     duration: Duration,
 }
 
 impl Timeout {
+    /// Creates a new instance of this struct.
+    /// This struct will represent a timeout at `duration` from now.
     pub fn new(duration: Duration) -> Self {
         Self {
             start: Instant::now(),
@@ -23,6 +25,8 @@ impl Timeout {
         }
     }
 
+    /// Returns the [Duration] remaining to the timeout.
+    /// If there is no time left, returns an [io::Error] of kind [ErrorKind::TimedOut].
     pub fn remaining(&self) -> io::Result<Duration> {
         let elapsed = self.start.elapsed();
         let remaining = self.duration.checked_sub(elapsed);
@@ -33,6 +37,8 @@ impl Timeout {
         }
     }
 
+    /// Returns the number of milliseconds remaining to the timeout.
+    /// If there is no time left, returns an [io::Error] of kind [ErrorKind::TimedOut].
     fn remaining_ms(&self) -> io::Result<u32> {
         let remaining = self.remaining()?.as_millis();
         if remaining > 0 {
@@ -43,9 +49,11 @@ impl Timeout {
     }
 }
 
+/// An error that can occurr when executing a command.
 #[derive(Debug)]
 pub struct Error {
-    pub error: io::Error,
+    /// An empty error probably means that the child process was killed by a signal.
+    pub error: Option<io::Error>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }
@@ -53,7 +61,7 @@ pub struct Error {
 impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
         Self {
-            error,
+            error: Some(error),
             stdout: Default::default(),
             stderr: Default::default(),
         }
@@ -77,7 +85,7 @@ impl CanFail for Output {
         if self.status.success() {
             Ok(self)
         } else {
-            let error = io::Error::from_raw_os_error(self.status.into_raw());
+            let error = self.status.code().map(io::Error::from_raw_os_error);
             Err(Error {
                 error,
                 stdout: self.stdout,
