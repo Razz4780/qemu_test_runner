@@ -1,9 +1,9 @@
-use crate::{CanFail, Result};
+use crate::{Output, Result};
 use std::{
     ffi::{OsStr, OsString},
     io::{self, Error, ErrorKind},
     net::{Ipv4Addr, SocketAddr},
-    process::{ExitStatus, Output, Stdio},
+    process::{ExitStatus, Stdio},
     sync::Arc,
 };
 use tokio::{
@@ -42,7 +42,7 @@ impl ImageBuilder {
             .arg(dst)
             .output()
             .await?
-            .result()
+            .try_into()
     }
 }
 
@@ -78,7 +78,7 @@ impl QemuInstance {
             .unwrap()
             .wait_with_output()
             .await?
-            .result()
+            .try_into()
     }
 
     /// Checks whether the wrapped [Child] has exited.

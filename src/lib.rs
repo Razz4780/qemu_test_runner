@@ -1,6 +1,6 @@
 use std::{
     io::{self, ErrorKind},
-    process::Output,
+    process,
     time::{Duration, Instant},
 };
 
@@ -76,20 +76,28 @@ impl From<ssh2::Error> for Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-pub trait CanFail: Sized {
-    fn result(self) -> Result<Self>;
+/// An output of a successful command.
+#[derive(Debug)]
+pub struct Output {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }
 
-impl CanFail for Output {
-    fn result(self) -> Result<Self> {
-        if self.status.success() {
-            Ok(self)
+impl TryFrom<process::Output> for Output {
+    type Error = Error;
+
+    fn try_from(output: process::Output) -> Result<Self> {
+        if output.status.success() {
+            Ok(Self {
+                stdout: output.stdout,
+                stderr: output.stderr,
+            })
         } else {
-            let error = self.status.code().map(io::Error::from_raw_os_error);
+            let error = output.status.code().map(io::Error::from_raw_os_error);
             Err(Error {
                 error,
-                stdout: self.stdout,
-                stderr: self.stderr,
+                stdout: output.stdout,
+                stderr: output.stderr,
             })
         }
     }

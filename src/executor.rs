@@ -1,12 +1,5 @@
-use crate::{qemu::QemuInstance, ssh::SshHandle, CanFail, Result, Timeout};
-use std::{
-    cmp, io,
-    os::unix::prelude::ExitStatusExt,
-    path::PathBuf,
-    process::{ExitStatus, Output},
-    thread,
-    time::Duration,
-};
+use crate::{qemu::QemuInstance, ssh::SshHandle, Output, Result, Timeout};
+use std::{cmp, io, path::PathBuf, thread, time::Duration};
 
 /// An action that can be executed on a running [QemuInstance].
 #[derive(Debug, Clone)]
@@ -17,7 +10,7 @@ pub enum Action {
         local: PathBuf,
         /// Remote path to the destination.
         remote: PathBuf,
-        /// UNIX permissions of the file created inside [QemuInstance].
+        /// UNIX permissions of the destination file.
         mode: i32,
         /// File transfer timeout.
         timeout: Duration,
@@ -89,7 +82,7 @@ impl Executor {
     async fn kill_qemu(mut self) -> Result<Output> {
         let mut qemu = self.qemu.take().unwrap();
         qemu.kill().await.ok();
-        qemu.wait().await?.result()
+        qemu.wait().await
     }
 
     /// Waits for the [Output] of the inner [QemuInstance].
@@ -99,7 +92,7 @@ impl Executor {
         loop {
             let exited = self.qemu.as_mut().unwrap().try_wait()?.is_some();
             if exited {
-                break self.qemu.take().unwrap().wait().await?.result();
+                break self.qemu.take().unwrap().wait().await;
             }
             match timeout.remaining() {
                 Ok(remaining) => thread::sleep(cmp::min(remaining, Duration::from_secs(1))),
@@ -137,7 +130,6 @@ impl Executor {
                     .send(local.clone(), remote.clone(), *mode, *timeout)
                     .await
                     .map(|_| Output {
-                        status: ExitStatus::from_raw(0),
                         stdout: Default::default(),
                         stderr: Default::default(),
                     }),
