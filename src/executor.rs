@@ -1,151 +1,160 @@
-use crate::{qemu::Instance, ssh::Controller, CanFail, Timeout};
-use std::{
-    cmp,
-    ffi::OsString,
-    io::Result,
-    net::SocketAddr,
-    os::unix::prelude::ExitStatusExt,
-    path::PathBuf,
-    process::{ExitStatus, Output},
-    thread,
-    time::Duration,
-};
+use crate::{qemu::QemuInstance, ssh::SshHandle, Output, Result, Timeout};
+use std::{cmp, io, path::PathBuf, thread, time::Duration};
 
+/// An action that can be executed on a running [QemuInstance].
 #[derive(Debug, Clone)]
 pub enum Action {
+    /// Transfer a file through SSH.
     Send {
+        /// Local path to the source file.
         local: PathBuf,
+        /// Remote path to the destination.
         remote: PathBuf,
+        /// UNIX permissions of the destination file.
         mode: i32,
+        /// File transfer timeout.
         timeout: Duration,
     },
+    /// Execute a command through SSH.
     Exec {
+        /// Command to be executed.
         cmd: String,
+        /// Command timeout.
         timeout: Duration,
     },
 }
 
-pub struct Config {
-    pub ssh_addr: SocketAddr,
-    pub ssh_username: String,
-    pub ssh_password: String,
+/// Config for running a sequence of [Action]s on a [QemuInstance].
+pub struct ExecutionConfig {
+    /// The user these [Action]s will be executed by.
+    pub user: String,
+    /// The password for the user.
+    pub password: String,
+    /// [Action]s to be executed.
+    pub actions: Vec<Action>,
+    /// Timeout for [QemuInstance] startup.
     pub startup_timeout: Duration,
+    /// Timeout for [QemuInstance] shutdown.
     pub poweroff_timeout: Duration,
-    pub poweroff_cmd: String,
+    /// The command that will be used to shutdown the [QemuInstance].
+    pub poweroff_command: String,
 }
 
+/// A report from executing a sequence of [Action]s on a [QemuInstance].
 #[derive(Debug)]
 pub struct ExecutionReport {
-    pub image_path: OsString,
+    /// Result of spawning the [QemuInstance].
     pub qemu: Result<Output>,
+    /// Result of creating the SSH connection.
     pub connect: Result<()>,
-    pub actions: Vec<(Action, Result<Output>)>,
+    /// Results of the executed [Action]s.
+    pub actions: Vec<Result<Output>>,
+    /// Result of the shutdown command.
     pub poweroff: Option<Result<Output>>,
 }
 
-impl CanFail for ExecutionReport {
-    fn failed(&self) -> bool {
-        self.qemu.failed()
-            || self.connect.failed()
-            || self.actions.iter().any(|(_, res)| res.failed())
-    }
-}
-
+/// A wrapper over a [QemuInstance].
+/// Used to run an [ExecutionConfig].
 pub struct Executor {
-    qemu: Option<Instance>,
-    config: Config,
+    qemu: Option<QemuInstance>,
 }
 
 impl Executor {
-    pub fn new(qemu: Instance, config: Config) -> Self {
-        Self {
-            qemu: Some(qemu),
-            config,
-        }
+    /// Creates a new instance of this struct.
+    /// This instance will operate on the given [QemuInstance].
+    pub fn new(qemu: QemuInstance) -> Self {
+        Self { qemu: Some(qemu) }
     }
 
-    fn controller(&self) -> Result<Controller> {
-        Controller::new(
-            self.config.ssh_addr,
-            &self.config.ssh_username,
-            &self.config.ssh_password,
-            self.config.startup_timeout,
+    /// Creates a new [SshHandle] for the inner [QemuInstance].
+    async fn get_ssh_handle(&self, config: &ExecutionConfig) -> io::Result<SshHandle> {
+        let ssh_addr = self.qemu.as_ref().unwrap().ssh();
+        SshHandle::new(
+            ssh_addr,
+            config.user.clone(),
+            config.password.clone(),
+            config.startup_timeout,
         )
+        .await
     }
 
-    fn kill_qemu(mut self) -> Result<Output> {
+    /// Kills the inner [QemuInstance] and waits for its [Output].
+    async fn kill_qemu(mut self) -> Result<Output> {
         let mut qemu = self.qemu.take().unwrap();
-        qemu.kill().ok();
-        qemu.wait()
+        qemu.kill().await.ok();
+        qemu.wait().await
     }
 
-    fn wait_qemu(mut self) -> Result<Output> {
-        let timeout = Timeout::new(self.config.poweroff_timeout);
+    /// Waits for the [Output] of the inner [QemuInstance].
+    async fn wait_qemu(mut self, timeout: Duration) -> Result<Output> {
+        let timeout = Timeout::new(timeout);
 
         loop {
             let exited = self.qemu.as_mut().unwrap().try_wait()?.is_some();
             if exited {
-                break self.qemu.take().unwrap().wait();
+                break self.qemu.take().unwrap().wait().await;
             }
             match timeout.remaining() {
                 Ok(remaining) => thread::sleep(cmp::min(remaining, Duration::from_secs(1))),
-                Err(_) => break self.kill_qemu(),
+                Err(_) => break self.kill_qemu().await,
             }
         }
     }
 
-    pub fn run(self, actions: Vec<Action>) -> ExecutionReport {
-        let image_path = self.qemu.as_ref().unwrap().image().into();
-
-        let mut controller = match self.controller() {
-            Ok(controller) => controller,
+    /// Runs the given [ExecutionConfig] on the inner [QemuInstance].
+    /// The instance is shut down after the last [Action] in the config.
+    /// The [Action]s are executed as long as there is no error.
+    pub async fn run(self, config: &ExecutionConfig) -> ExecutionReport {
+        let mut ssh = match self.get_ssh_handle(config).await {
+            Ok(ssh) => ssh,
             Err(e) => {
                 return ExecutionReport {
-                    image_path,
-                    qemu: self.kill_qemu(),
-                    connect: Err(e),
+                    qemu: self.kill_qemu().await,
+                    connect: Err(e.into()),
                     actions: Default::default(),
                     poweroff: None,
                 }
             }
         };
 
-        let mut results = Vec::with_capacity(actions.len());
-        let mut err = false;
-        for action in actions {
-            let res = match &action {
-                Action::Exec { cmd, timeout } => controller.exec(cmd, *timeout),
+        let mut results = Vec::with_capacity(config.actions.len());
+        for action in &config.actions {
+            let res = match action {
+                Action::Exec { cmd, timeout } => ssh.exec(cmd.clone(), *timeout).await,
                 Action::Send {
                     local,
                     remote,
                     mode,
                     timeout,
-                } => controller
-                    .send(local, remote, *mode, *timeout)
+                } => ssh
+                    .send(local.clone(), remote.clone(), *mode, *timeout)
+                    .await
                     .map(|_| Output {
-                        status: ExitStatus::from_raw(0),
                         stdout: Default::default(),
                         stderr: Default::default(),
                     }),
             };
-            err = res.failed();
 
-            results.push((action, res));
-
-            if err {
+            results.push(res);
+            if results.last().unwrap().is_err() {
                 break;
             }
         }
 
-        let (qemu, poweroff) = if err {
-            (self.kill_qemu(), None)
+        let kill = results.last().map(Result::is_err).unwrap_or(false);
+        let (qemu, poweroff) = if kill {
+            (self.kill_qemu().await, None)
         } else {
-            let poweroff = controller.exec(&self.config.poweroff_cmd, self.config.poweroff_timeout);
-            (self.wait_qemu(), Some(poweroff))
+            let poweroff = ssh
+                .exec(config.poweroff_command.clone(), config.poweroff_timeout)
+                .await;
+            (
+                self.wait_qemu(config.poweroff_timeout).await,
+                Some(poweroff),
+            )
         };
 
         ExecutionReport {
-            image_path,
             qemu,
             connect: Ok(()),
             actions: results,

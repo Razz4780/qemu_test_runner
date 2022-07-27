@@ -1,43 +1,37 @@
+use crate::{Output, Result};
 use std::{
     ffi::{OsStr, OsString},
-    fmt::{self, Display, Formatter},
-    io::Result,
-    process::{Child, Command, ExitStatus, Output, Stdio},
+    io::{self, Error, ErrorKind},
+    net::{Ipv4Addr, SocketAddr},
+    process::{ExitStatus, Stdio},
+    sync::Arc,
+};
+use tokio::{
+    process::{Child, Command},
+    sync::{OwnedSemaphorePermit, Semaphore},
+    task,
 };
 
-/// A command for building QEMU images.
-pub struct Build<S> {
+/// A struct for building new Qemu images.
+pub struct ImageBuilder {
     /// Command invoked to create a new image.
-    cmd: S,
+    cmd: OsString,
 }
 
-impl Default for Build<&'static str> {
+impl ImageBuilder {
     /// Creates a new instance of this struct.
-    /// The instance will use `qemu-img` to create images.
-    fn default() -> Self {
-        Self { cmd: "qemu-img" }
+    /// This instance will use the given `cmd` to build images.
+    pub fn new(cmd: OsString) -> Self {
+        Self { cmd }
     }
-}
 
-impl<S> Build<S> {
-    /// Sets the command invoked by this struct to create a new image.
-    pub fn cmd(&mut self, cmd: S) -> &mut Self {
-        self.cmd = cmd;
-        self
-    }
-}
-
-impl<S> Build<S>
-where
-    S: AsRef<OsStr>,
-{
     /// Creates a new qcow2 image located at `dst` and backed by `src`.
-    pub fn qcow2(&self, src: &OsStr, dst: &OsStr) -> Result<Output> {
+    pub async fn qcow2(&self, src: &OsStr, dst: &OsStr) -> Result<Output> {
         let mut image = OsString::new();
         image.push("backing_file=");
         image.push(src);
 
-        Command::new(self.cmd.as_ref())
+        Command::new(&self.cmd)
             .arg("create")
             .arg("-f")
             .arg("qcow2")
@@ -47,149 +41,100 @@ where
             .arg(image)
             .arg(dst)
             .output()
+            .await?
+            .try_into()
     }
 }
 
-/// An internet protocol for port forwarding.
-pub enum Protocol {
-    Tcp,
-    Udp,
+/// A wrapper over a Qemu instance running as a [Child] process.
+/// The instance is killed on drop.
+pub struct QemuInstance {
+    child: Option<Child>,
+    permit: Option<OwnedSemaphorePermit>,
+    image_path: OsString,
+    ssh_port: u16,
 }
 
-impl Display for Protocol {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Tcp => f.write_str("tcp"),
-            Self::Udp => f.write_str("udp"),
+impl QemuInstance {
+    /// Returns a [SocketAddr] for the SSH connection.
+    pub fn ssh(&self) -> SocketAddr {
+        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), self.ssh_port)
+    }
+
+    /// Returns a path to the Qemu image of this instance.
+    pub fn image_path(&self) -> &OsStr {
+        &self.image_path
+    }
+
+    /// Kills the wrapped [Child].
+    pub async fn kill(&mut self) -> io::Result<()> {
+        self.child.as_mut().unwrap().kill().await
+    }
+
+    /// Waits for the wrapped [Child]'s [Output].
+    pub async fn wait(mut self) -> Result<Output> {
+        self.child
+            .take()
+            .unwrap()
+            .wait_with_output()
+            .await?
+            .try_into()
+    }
+
+    /// Checks whether the wrapped [Child] has exited.
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child.as_mut().unwrap().try_wait()
+    }
+}
+
+impl Drop for QemuInstance {
+    fn drop(&mut self) {
+        let permit = self.permit.take();
+        if let Some(mut child) = self.child.take() {
+            child.start_kill().ok();
+            task::spawn(async move {
+                let _permit = permit;
+                child.wait().await.ok();
+            });
         }
     }
 }
 
-/// A direction for port forwarding.
-pub enum Direction {
-    /// Forwarding from a host port to a guest port.
-    Hostfwd,
-    /// Forwarding from a guest port to a host port.
-    Guestfwd,
+/// A config for spawning new Qemu instances.
+pub struct QemuConfig {
+    /// The command used to invoke Qemu.
+    pub cmd: OsString,
+    /// The memory limit for new instances (megabytes).
+    pub memory: u16,
+    /// Whether to enable KVM for new instances.
+    pub enable_kvm: bool,
+    /// Whether to turn of the kernel irqchip.
+    pub irqchip_off: bool,
 }
 
-impl Display for Direction {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Hostfwd => f.write_str("hostfwd"),
-            Self::Guestfwd => f.write_str("guestfwd"),
-        }
-    }
+/// A struct used to spawn new Qemu instances.
+pub struct QemuSpawner {
+    permits: Arc<Semaphore>,
+    config: QemuConfig,
 }
 
-/// A port forwarding rule.
-pub struct Forward {
-    /// Internet protocol.
-    pub protocol: Protocol,
-    /// Forward direction.
-    pub direction: Direction,
-    /// Port to forward from.
-    pub from: u16,
-    /// Port to forward to.
-    pub to: u16,
-}
-
-impl Forward {
+impl QemuSpawner {
     /// Creates a new instance of this struct.
-    /// The instance will represent a forwarding rule with:
-    /// * protocol = [Protocol::Tcp],
-    /// * direction = [Direction::Hostfwd],
-    /// * from = a random unused port,
-    /// * to = 22.
-    /// This should enable connecting to the running instance with SSH.
-    /// Returns [None] when no unused port can be found.
-    pub fn new_ssh() -> Option<Self> {
-        let port = portpicker::pick_unused_port()?;
-        Some(Self {
-            protocol: Protocol::Tcp,
-            direction: Direction::Hostfwd,
-            from: port,
-            to: 22,
-        })
-    }
-}
-
-/// A command for running QEMU images.
-pub struct Run<S> {
-    /// Command invoked to run an image.
-    cmd: S,
-    /// Memory available to the image (megabytes).
-    memory: u16,
-    /// Whether to use kvm or not.
-    enable_kvm: bool,
-    /// Port forwarding rules.
-    forwards: Vec<Forward>,
-    /// Whether do turn off the kernel irqchip.
-    irqchip_off: bool,
-}
-
-impl Default for Run<&'static str> {
-    /// Creates a new instance of this struct.
-    /// The instance will:
-    /// * use `qemu-system-x86_64` command to run images,
-    /// * set the available memory to 1024M,
-    /// * enable kvm,
-    /// * not forward any port,
-    /// * turn off the kernel irqchip.
-    fn default() -> Self {
+    /// At any time there will be at most `children_limit` running Qemu processes spawned with this instance.
+    pub fn new(children_limit: usize, config: QemuConfig) -> Self {
         Self {
-            cmd: "qemu-system-x86_64",
-            memory: 1024,
-            enable_kvm: true,
-            forwards: Default::default(),
-            irqchip_off: true,
+            permits: Arc::new(Semaphore::new(children_limit)),
+            config,
         }
     }
-}
 
-impl<S> Run<S> {
-    /// Sets the command invoked by this struct to run an image.
-    pub fn cmd(&mut self, cmd: S) -> &mut Self {
-        self.cmd = cmd;
-        self
-    }
-
-    /// Sets the available memory.
-    pub fn memory(&mut self, memory: u16) -> &mut Self {
-        self.memory = memory;
-        self
-    }
-
-    /// Enables or disables kvm.
-    pub fn kvm(&mut self, enabled: bool) -> &mut Self {
-        self.enable_kvm = enabled;
-        self
-    }
-
-    /// Adds a port forward rule.
-    pub fn forward(&mut self, forward: Forward) -> &mut Self {
-        self.forwards.push(forward);
-        self
-    }
-
-    /// Turns the kernel irqchip off or on.
-    pub fn irqchip(&mut self, off: bool) -> &mut Self {
-        self.irqchip_off = off;
-        self
-    }
-}
-
-impl<S> Run<S>
-where
-    S: AsRef<OsStr>,
-{
-    /// Spawns a QEMU instance running the given `image`.
-    pub fn spawn(&self, image: &OsStr) -> Result<Instance> {
+    /// Prepares a [Command] to spawn a new instance.
+    fn setup_cmd(&self, image_path: &OsStr, ssh_port: u16) -> Command {
         let mut drive = OsString::new();
         drive.push("file=");
-        drive.push(image);
+        drive.push(image_path);
 
-        let mut cmd = Command::new(self.cmd.as_ref());
+        let mut cmd = Command::new(&self.config.cmd);
         cmd.arg("-nographic")
             .arg("-drive")
             .arg(drive)
@@ -197,70 +142,45 @@ where
             .arg("base=localtime")
             .arg("-net")
             .arg("nic,model=virtio")
+            .arg("-net")
+            .arg(format!("user,hostfwd=tcp::{}-:22", ssh_port))
             .arg("-m")
-            .arg(format!("{}M", self.memory));
-        if self.enable_kvm {
+            .arg(format!("{}M", self.config.memory));
+
+        if self.config.enable_kvm {
             cmd.arg("-enable-kvm");
         }
-        if self.irqchip_off {
+
+        if self.config.irqchip_off {
             cmd.arg("-machine").arg("kernel_irqchip=off");
-        }
-        if !self.forwards.is_empty() {
-            let forwards = self.forwards.iter().map(|forward| {
-                format!(
-                    "{}={}::{}-:{}",
-                    forward.direction, forward.protocol, forward.from, forward.to
-                )
-            });
-            let arg = ["user".to_string()]
-                .into_iter()
-                .chain(forwards)
-                .collect::<Vec<_>>()
-                .join(",");
-            cmd.arg("-net").arg(arg);
         }
 
         cmd.stderr(Stdio::piped())
             .stdout(Stdio::piped())
             .stdin(Stdio::null());
 
-        let child = cmd.spawn()?;
+        cmd
+    }
 
-        Ok(Instance {
+    /// Spawns a new Qemu instance.
+    /// The instance will use the image under the given `image_path`.
+    /// This method will wait if there are too many running Qemu processes spawned with this instance.
+    pub async fn spawn(&self, image_path: OsString) -> Result<QemuInstance> {
+        let ssh_port = portpicker::pick_unused_port()
+            .ok_or_else(|| Error::new(ErrorKind::Other, "no free port"))?;
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore should not be closed");
+        let child = self.setup_cmd(&image_path, ssh_port).spawn()?;
+
+        Ok(QemuInstance {
             child: Some(child),
-            image: image.into(),
+            permit: Some(permit),
+            image_path,
+            ssh_port,
         })
-    }
-}
-
-pub struct Instance {
-    child: Option<Child>,
-    image: OsString,
-}
-
-impl Instance {
-    pub fn image(&self) -> &OsStr {
-        &self.image
-    }
-
-    pub fn kill(&mut self) -> Result<()> {
-        self.child.as_mut().unwrap().kill()
-    }
-
-    pub fn wait(mut self) -> Result<Output> {
-        self.child.take().unwrap().wait_with_output()
-    }
-
-    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
-        self.child.as_mut().unwrap().try_wait()
-    }
-}
-
-impl Drop for Instance {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            child.kill().ok();
-            child.wait().ok();
-        }
     }
 }
