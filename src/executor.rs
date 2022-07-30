@@ -68,7 +68,8 @@ impl Executor {
 
     /// Creates a new [SshHandle] for the inner [QemuInstance].
     async fn get_ssh_handle(&self, config: &ExecutionConfig) -> io::Result<SshHandle> {
-        let ssh_addr = self.qemu.as_ref().unwrap().ssh();
+        let ssh_addr = self.qemu.as_ref().unwrap().ssh().await?;
+
         SshHandle::new(
             ssh_addr,
             config.user.clone(),

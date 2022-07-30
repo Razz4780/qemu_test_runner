@@ -1,15 +1,22 @@
 use crate::{Output, Result};
 use std::{
     ffi::{OsStr, OsString},
-    io::{self, Error, ErrorKind},
+    io,
     net::{Ipv4Addr, SocketAddr},
+    path::PathBuf,
     process::{ExitStatus, Stdio},
+    str::FromStr,
     sync::Arc,
+    time::Duration,
 };
+use tempfile::TempDir;
 use tokio::{
+    fs,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
     process::{Child, Command},
     sync::{OwnedSemaphorePermit, Semaphore},
-    task,
+    task, time,
 };
 
 /// A struct for building new Qemu images.
@@ -46,22 +53,86 @@ impl ImageBuilder {
     }
 }
 
+/// A struct for interacting with QEMU Monitor.
+struct MonitorHandle {
+    /// A temporary directory containing the UNIX socket used by the Monitor.
+    socket_dir: TempDir,
+}
+
+impl MonitorHandle {
+    /// Name of the UNIX socket file, fixed.
+    const SOCKET_NAME: &'static str = "monitor.sock";
+
+    /// Creates a new instance of this struct.
+    /// Creates a temporary directory for the socket file, but does not create the socket itself.
+    /// It must be created by the QEMU.
+    fn new() -> io::Result<Self> {
+        let socket_dir = tempfile::tempdir()?;
+
+        Ok(Self { socket_dir })
+    }
+
+    /// Returns the path to the UNIX socket.
+    /// This path may not exist yet, the socket should be created by the QEMU.
+    fn socket(&self) -> PathBuf {
+        self.socket_dir.path().join(Self::SOCKET_NAME)
+    }
+
+    /// Returns the number of the local port forwarded to the port 22 (standard SSH port).
+    async fn ssh_port(&self) -> io::Result<u16> {
+        let mut stream = UnixStream::connect(self.socket()).await?;
+
+        stream.write_all(b"info usernet\n").await?;
+        stream.flush().await?;
+        stream.shutdown().await?;
+
+        let mut buffered = BufReader::new(stream);
+        let mut line = String::with_capacity(1024);
+
+        loop {
+            line.clear();
+            if buffered.read_line(&mut line).await? == 0 {
+                break Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "no SSH port forward in network info received from the QEMU monitor",
+                ));
+            }
+
+            let mut chunks = line.split_ascii_whitespace();
+            let hostfwd = chunks
+                .next()
+                .map(|p| p.contains("HOST_FORWARD"))
+                .unwrap_or(false);
+            if hostfwd {
+                let src_port = chunks.nth(2).map(u16::from_str).transpose().ok().flatten();
+                let dst_port = chunks.nth(1).map(u16::from_str).transpose().ok().flatten();
+
+                if let (Some(src), Some(22)) = (src_port, dst_port) {
+                    break Ok(src);
+                }
+            }
+        }
+    }
+}
+
 /// A wrapper over a Qemu instance running as a [Child] process.
 /// The instance is killed on drop.
 pub struct QemuInstance {
     child: Option<Child>,
     permit: Option<OwnedSemaphorePermit>,
     image_path: OsString,
-    ssh_port: u16,
+    monitor: MonitorHandle,
 }
 
 impl QemuInstance {
     /// Returns a [SocketAddr] for the SSH connection.
-    pub fn ssh(&self) -> SocketAddr {
-        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), self.ssh_port)
+    pub async fn ssh(&self) -> io::Result<SocketAddr> {
+        let port = self.monitor.ssh_port().await?;
+
+        Ok(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port))
     }
 
-    /// Returns a path to the Qemu image of this instance.
+    /// Returns a path to the QEMU image of this instance.
     pub fn image_path(&self) -> &OsStr {
         &self.image_path
     }
@@ -100,9 +171,9 @@ impl Drop for QemuInstance {
     }
 }
 
-/// A config for spawning new Qemu instances.
+/// A config for spawning new [QemuInstance]s.
 pub struct QemuConfig {
-    /// The command used to invoke Qemu.
+    /// The command used to invoke QEMU.
     pub cmd: OsString,
     /// The memory limit for new instances (megabytes).
     pub memory: u16,
@@ -112,7 +183,7 @@ pub struct QemuConfig {
     pub irqchip_off: bool,
 }
 
-/// A struct used to spawn new Qemu instances.
+/// A struct used to spawn new [QemuInstance]s.
 pub struct QemuSpawner {
     permits: Arc<Semaphore>,
     config: QemuConfig,
@@ -120,7 +191,7 @@ pub struct QemuSpawner {
 
 impl QemuSpawner {
     /// Creates a new instance of this struct.
-    /// At any time there will be at most `children_limit` running Qemu processes spawned with this instance.
+    /// At any time there will be at most `children_limit` running QEMU processes spawned with this instance.
     pub fn new(children_limit: usize, config: QemuConfig) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(children_limit)),
@@ -129,10 +200,15 @@ impl QemuSpawner {
     }
 
     /// Prepares a [Command] to spawn a new instance.
-    fn setup_cmd(&self, image_path: &OsStr, ssh_port: u16) -> Command {
+    fn setup_cmd(&self, image_path: &OsStr, monitor_socket: &OsStr) -> Command {
         let mut drive = OsString::new();
         drive.push("file=");
         drive.push(image_path);
+
+        let mut monitor = OsString::new();
+        monitor.push("unix:");
+        monitor.push(monitor_socket);
+        monitor.push(",server,nowait");
 
         let mut cmd = Command::new(&self.config.cmd);
         cmd.arg("-nographic")
@@ -143,9 +219,11 @@ impl QemuSpawner {
             .arg("-net")
             .arg("nic,model=virtio")
             .arg("-net")
-            .arg(format!("user,hostfwd=tcp::{}-:22", ssh_port))
+            .arg("user,hostfwd=tcp::0-:22")
             .arg("-m")
-            .arg(format!("{}M", self.config.memory));
+            .arg(format!("{}M", self.config.memory))
+            .arg("-monitor")
+            .arg(monitor);
 
         if self.config.enable_kvm {
             cmd.arg("-enable-kvm");
@@ -162,25 +240,46 @@ impl QemuSpawner {
         cmd
     }
 
-    /// Spawns a new Qemu instance.
+    /// Spawns a new QEMU instance.
     /// The instance will use the image under the given `image_path`.
-    /// This method will wait if there are too many running Qemu processes spawned with this instance.
-    pub async fn spawn(&self, image_path: OsString) -> Result<QemuInstance> {
-        let ssh_port = portpicker::pick_unused_port()
-            .ok_or_else(|| Error::new(ErrorKind::Other, "no free port"))?;
+    /// This method will wait if there are too many running QEMU processes spawned with this instance.
+    /// This method will wait until the newly spawned QEMU creates a Monitor socket (but no longer than the given `monitor_timeout`).
+    pub async fn spawn(
+        &self,
+        image_path: OsString,
+        monitor_timeout: Option<Duration>,
+    ) -> Result<QemuInstance> {
         let permit = self
             .permits
             .clone()
             .acquire_owned()
             .await
             .expect("semaphore should not be closed");
-        let child = self.setup_cmd(&image_path, ssh_port).spawn()?;
+
+        let monitor = MonitorHandle::new()?;
+        let socket = monitor.socket();
+        let child = self.setup_cmd(&image_path, socket.as_os_str()).spawn()?;
+
+        if let Some(timeout) = monitor_timeout {
+            time::timeout(timeout, async move {
+                while fs::metadata(&socket).await.is_err() {
+                    time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "waiting for the QEMU to create a Monitor socket timed out",
+                )
+            })?;
+        }
 
         Ok(QemuInstance {
             child: Some(child),
             permit: Some(permit),
             image_path,
-            ssh_port,
+            monitor,
         })
     }
 }
