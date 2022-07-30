@@ -115,7 +115,7 @@ impl SshWorker {
         }
     }
 
-    /// Executed a command on the remote machine.
+    /// Executes a command on the remote machine.
     /// This is a blocking method.
     fn exec(&mut self, cmd: &str, timeout: Duration) -> Result<Output> {
         let timeout = Timeout::new(timeout);
