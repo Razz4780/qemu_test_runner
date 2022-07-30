@@ -6,7 +6,6 @@ use std::{
 
 pub mod executor;
 pub mod qemu;
-pub mod runner;
 pub mod ssh;
 
 /// A struct for tracking a timeout between blocking function calls.
