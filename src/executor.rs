@@ -67,8 +67,8 @@ impl Executor {
     }
 
     /// Creates a new [SshHandle] for the inner [QemuInstance].
-    async fn get_ssh_handle(&self, config: &ExecutionConfig) -> io::Result<SshHandle> {
-        let ssh_addr = self.qemu.as_ref().unwrap().ssh().await?;
+    fn get_ssh_handle(&self, config: &ExecutionConfig) -> io::Result<SshHandle> {
+        let ssh_addr = self.qemu.as_ref().unwrap().ssh()?;
 
         SshHandle::new(
             ssh_addr,
@@ -76,28 +76,27 @@ impl Executor {
             config.password.clone(),
             config.startup_timeout,
         )
-        .await
     }
 
     /// Kills the inner [QemuInstance] and waits for its [Output].
-    async fn kill_qemu(mut self) -> Result<Output> {
+    fn kill_qemu(mut self) -> Result<Output> {
         let mut qemu = self.qemu.take().unwrap();
-        qemu.kill().await.ok();
-        qemu.wait().await
+        qemu.kill().ok();
+        qemu.wait()
     }
 
     /// Waits for the [Output] of the inner [QemuInstance].
-    async fn wait_qemu(mut self, timeout: Duration) -> Result<Output> {
+    fn wait_qemu(mut self, timeout: Duration) -> Result<Output> {
         let timeout = Timeout::new(timeout);
 
         loop {
             let exited = self.qemu.as_mut().unwrap().try_wait()?.is_some();
             if exited {
-                break self.qemu.take().unwrap().wait().await;
+                break self.qemu.take().unwrap().wait();
             }
             match timeout.remaining() {
-                Ok(remaining) => thread::sleep(cmp::min(remaining, Duration::from_secs(1))),
-                Err(_) => break self.kill_qemu().await,
+                Ok(remaining) => thread::sleep(cmp::min(remaining, Duration::from_millis(100))),
+                Err(_) => break self.kill_qemu(),
             }
         }
     }
@@ -105,12 +104,12 @@ impl Executor {
     /// Runs the given [ExecutionConfig] on the inner [QemuInstance].
     /// The instance is shut down after the last [Action] in the config.
     /// The [Action]s are executed as long as there is no error.
-    pub async fn run(self, config: &ExecutionConfig) -> ExecutionReport {
-        let mut ssh = match self.get_ssh_handle(config).await {
+    pub fn run(self, config: &ExecutionConfig) -> ExecutionReport {
+        let mut ssh = match self.get_ssh_handle(config) {
             Ok(ssh) => ssh,
             Err(e) => {
                 return ExecutionReport {
-                    qemu: self.kill_qemu().await,
+                    qemu: self.kill_qemu(),
                     connect: Err(e.into()),
                     actions: Default::default(),
                     poweroff: None,
@@ -121,19 +120,16 @@ impl Executor {
         let mut results = Vec::with_capacity(config.actions.len());
         for action in &config.actions {
             let res = match action {
-                Action::Exec { cmd, timeout } => ssh.exec(cmd.clone(), *timeout).await,
+                Action::Exec { cmd, timeout } => ssh.exec(cmd, *timeout),
                 Action::Send {
                     local,
                     remote,
                     mode,
                     timeout,
-                } => ssh
-                    .send(local.clone(), remote.clone(), *mode, *timeout)
-                    .await
-                    .map(|_| Output {
-                        stdout: Default::default(),
-                        stderr: Default::default(),
-                    }),
+                } => ssh.send(local, remote, *mode, *timeout).map(|_| Output {
+                    stdout: Default::default(),
+                    stderr: Default::default(),
+                }),
             };
 
             results.push(res);
@@ -144,15 +140,10 @@ impl Executor {
 
         let kill = results.last().map(Result::is_err).unwrap_or(false);
         let (qemu, poweroff) = if kill {
-            (self.kill_qemu().await, None)
+            (self.kill_qemu(), None)
         } else {
-            let poweroff = ssh
-                .exec(config.poweroff_command.clone(), config.poweroff_timeout)
-                .await;
-            (
-                self.wait_qemu(config.poweroff_timeout).await,
-                Some(poweroff),
-            )
+            let poweroff = ssh.exec(&config.poweroff_command, config.poweroff_timeout);
+            (self.wait_qemu(config.poweroff_timeout), Some(poweroff))
         };
 
         ExecutionReport {
