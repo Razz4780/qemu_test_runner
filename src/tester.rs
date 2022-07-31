@@ -2,6 +2,7 @@ use crate::{
     executor::{ExecutionConfig, Executor, ExecutorReport},
     qemu::{Image, ImageBuilder, QemuSpawner},
 };
+use serde::Deserialize;
 use std::{
     collections::HashMap,
     ffi::OsStr,
@@ -31,13 +32,23 @@ impl PartialReport {
     }
 }
 
-#[derive(Default)]
 pub struct TestReport {
-    build: Vec<PartialReport>,
-    tests: HashMap<String, Vec<PartialReport>>,
+    pub solution: PathBuf,
+    pub build: Vec<PartialReport>,
+    pub tests: HashMap<String, Vec<PartialReport>>,
 }
 
-#[derive(Clone)]
+impl TestReport {
+    fn new(solution: PathBuf) -> Self {
+        Self {
+            solution,
+            build: Default::default(),
+            tests: Default::default(),
+        }
+    }
+}
+
+#[derive(Clone, Deserialize)]
 pub enum Step {
     Cmd {
         command: String,
@@ -51,9 +62,9 @@ pub enum Step {
     },
 }
 
+#[derive(Deserialize, Clone)]
 pub struct Config {
     retries: usize,
-    config: ExecutionConfig,
     phases: Vec<Vec<Step>>,
 }
 
@@ -64,6 +75,7 @@ pub struct Tester {
     pub build_config: Config,
     pub tests: HashMap<String, Config>,
     pub patch_dst: PathBuf,
+    pub execution_config: ExecutionConfig,
 }
 
 impl Tester {
@@ -72,7 +84,7 @@ impl Tester {
 
         for phase in config.phases.iter().cloned() {
             let instance = self.spawner.spawn(image.to_owned()).await?;
-            let mut executor = Executor::new(instance, &self.build_config.config).await;
+            let mut executor = Executor::new(instance, &self.execution_config).await;
 
             for step in phase {
                 let cont = match step {
@@ -103,7 +115,7 @@ impl Tester {
         let mut res = PartialReport::default();
 
         let instance = self.spawner.spawn(image.to_owned()).await?;
-        let mut executor = Executor::new(instance, &self.build_config.config).await;
+        let mut executor = Executor::new(instance, &self.execution_config).await;
         executor
             .send(
                 solution,
@@ -133,7 +145,7 @@ impl Tester {
         solution: &Path,
         artifacts: Arc<PathBuf>,
     ) -> crate::Result<TestReport> {
-        let mut res = TestReport::default();
+        let mut res = TestReport::new(solution.to_path_buf());
 
         let patched_img = Arc::new(artifacts.join("patched.img"));
         let mut success = false;

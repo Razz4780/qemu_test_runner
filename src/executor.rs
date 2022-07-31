@@ -1,4 +1,5 @@
 use crate::{qemu::QemuInstance, ssh::SshHandle, Output};
+use serde::Deserialize;
 use std::{
     ffi::{OsStr, OsString},
     io,
@@ -21,6 +22,7 @@ impl StepReport {
 }
 
 /// Config for running a sequence of actions on a [QemuInstance].
+#[derive(Deserialize)]
 pub struct ExecutionConfig {
     /// The user to executing actions.
     pub user: String,
