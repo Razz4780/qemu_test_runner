@@ -1,53 +1,12 @@
 use std::{
     fmt::{self, Debug, Formatter},
-    io::{self, ErrorKind},
-    process,
-    time::{Duration, Instant},
+    io, process,
 };
+use tokio::time::error::Elapsed;
 
 pub mod executor;
 pub mod qemu;
 pub mod ssh;
-
-/// A struct for tracking a timeout between blocking function calls.
-pub struct Timeout {
-    start: Instant,
-    duration: Duration,
-}
-
-impl Timeout {
-    /// Creates a new instance of this struct.
-    /// This struct will represent a timeout at `duration` from now.
-    pub fn new(duration: Duration) -> Self {
-        Self {
-            start: Instant::now(),
-            duration,
-        }
-    }
-
-    /// Returns the [Duration] remaining to the timeout.
-    /// If there is no time left, returns an [io::Error] of kind [ErrorKind::TimedOut].
-    pub fn remaining(&self) -> io::Result<Duration> {
-        let elapsed = self.start.elapsed();
-        let remaining = self.duration.checked_sub(elapsed);
-
-        match remaining {
-            Some(r) if r > Duration::ZERO => Ok(r),
-            _ => Err(ErrorKind::TimedOut.into()),
-        }
-    }
-
-    /// Returns the number of milliseconds remaining to the timeout.
-    /// If there is no time left, returns an [io::Error] of kind [ErrorKind::TimedOut].
-    fn remaining_ms(&self) -> io::Result<u32> {
-        let remaining = self.remaining()?.as_millis();
-        if remaining > 0 {
-            Ok(remaining.try_into().unwrap_or(u32::MAX))
-        } else {
-            Err(ErrorKind::TimedOut.into())
-        }
-    }
-}
 
 /// An error that can occurr when executing a command.
 pub struct Error {
@@ -83,9 +42,20 @@ impl From<ssh2::Error> for Error {
     }
 }
 
+impl From<Elapsed> for Error {
+    fn from(_: Elapsed) -> Self {
+        Self {
+            error: Some(io::ErrorKind::TimedOut.into()),
+            stdout: Default::default(),
+            stderr: Default::default(),
+        }
+    }
+}
+
 pub type Result<T> = core::result::Result<T, Error>;
 
 /// An output of a successful command.
+#[derive(Default)]
 pub struct Output {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
