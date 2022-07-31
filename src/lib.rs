@@ -7,6 +7,7 @@ use tokio::time::error::Elapsed;
 pub mod executor;
 pub mod qemu;
 pub mod ssh;
+pub mod tester;
 
 /// An error that can occurr when executing a command.
 pub struct Error {
