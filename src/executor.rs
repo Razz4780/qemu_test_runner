@@ -1,165 +1,238 @@
-use crate::{qemu::QemuInstance, ssh::SshHandle, Output, Result, Timeout};
-use std::{cmp, io, path::PathBuf, thread, time::Duration};
+use crate::{qemu::QemuInstance, ssh::SshHandle, Output};
+use std::{
+    ffi::{OsStr, OsString},
+    io,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+use tokio::time::{self, error::Elapsed};
 
-/// An action that can be executed on a running [QemuInstance].
-#[derive(Debug, Clone)]
-pub enum Action {
-    /// Transfer a file through SSH.
-    Send {
-        /// Local path to the source file.
-        local: PathBuf,
-        /// Remote path to the destination.
-        remote: PathBuf,
-        /// UNIX permissions of the destination file.
-        mode: i32,
-        /// File transfer timeout.
-        timeout: Duration,
-    },
-    /// Execute a command through SSH.
-    Exec {
-        /// Command to be executed.
-        cmd: String,
-        /// Command timeout.
-        timeout: Duration,
-    },
+#[derive(Debug)]
+pub struct StepReport {
+    pub description: String,
+    pub elapsed_time: Duration,
+    pub output: crate::Result<Output>,
 }
 
-/// Config for running a sequence of [Action]s on a [QemuInstance].
+impl StepReport {
+    fn success(&self) -> bool {
+        self.output.is_ok()
+    }
+}
+
+/// Config for running a sequence of actions on a [QemuInstance].
 pub struct ExecutionConfig {
-    /// The user these [Action]s will be executed by.
+    /// The user to executing actions.
     pub user: String,
     /// The password for the user.
     pub password: String,
-    /// [Action]s to be executed.
-    pub actions: Vec<Action>,
-    /// Timeout for [QemuInstance] startup.
-    pub startup_timeout: Duration,
+    /// Timeout for opening an SSH connection with the [QemuInstance].
+    pub connection_timeout: Duration,
     /// Timeout for [QemuInstance] shutdown.
     pub poweroff_timeout: Duration,
     /// The command that will be used to shutdown the [QemuInstance].
     pub poweroff_command: String,
+    /// Timeout for blocking libssh2 calls.
+    pub blocking_ssh_calls_timeout: Duration,
 }
 
-/// A report from executing a sequence of [Action]s on a [QemuInstance].
+/// A report from executing a sequence of actions on a [QemuInstance].
 #[derive(Debug)]
-pub struct ExecutionReport {
-    /// Result of spawning the [QemuInstance].
-    pub qemu: Result<Output>,
+pub struct ExecutorReport {
+    /// Path to the image used by the [QemuInstance].
+    image: OsString,
+    /// Output of the [QemuInstance].
+    qemu: crate::Result<Output>,
     /// Result of creating the SSH connection.
-    pub connect: Result<()>,
-    /// Results of the executed [Action]s.
-    pub actions: Vec<Result<Output>>,
-    /// Result of the shutdown command.
-    pub poweroff: Option<Result<Output>>,
+    connect: io::Result<()>,
+    /// Reports from the executed steps.
+    steps: Vec<StepReport>,
+}
+
+impl ExecutorReport {
+    pub fn image(&self) -> &OsStr {
+        &self.image
+    }
+
+    pub fn qemu(&self) -> Result<&Output, &crate::Error> {
+        self.qemu.as_ref()
+    }
+
+    pub fn connect(&self) -> Option<&io::Error> {
+        self.connect.as_ref().err()
+    }
+
+    pub fn steps(&self) -> &[StepReport] {
+        &self.steps[..]
+    }
+
+    pub fn success(&self) -> bool {
+        self.qemu.is_ok() && self.connect.is_ok() && self.steps.iter().all(StepReport::success)
+    }
 }
 
 /// A wrapper over a [QemuInstance].
-/// Used to run an [ExecutionConfig].
+/// Used to interact with the instance over SSH.
 pub struct Executor {
-    qemu: Option<QemuInstance>,
+    qemu: QemuInstance,
+    config: ExecutionConfig,
+    ssh: io::Result<SshHandle>,
+    step_reports: Vec<StepReport>,
 }
 
 impl Executor {
     /// Creates a new instance of this struct.
     /// This instance will operate on the given [QemuInstance].
-    pub fn new(qemu: QemuInstance) -> Self {
-        Self { qemu: Some(qemu) }
-    }
+    pub async fn new(qemu: QemuInstance, config: ExecutionConfig) -> Self {
+        let ssh = time::timeout(config.connection_timeout, async {
+            loop {
+                let handle = match qemu.ssh().await {
+                    Ok(addr) => {
+                        SshHandle::new(
+                            addr,
+                            config.user.clone(),
+                            config.password.clone(),
+                            config.blocking_ssh_calls_timeout,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
 
-    /// Creates a new [SshHandle] for the inner [QemuInstance].
-    async fn get_ssh_handle(&self, config: &ExecutionConfig) -> io::Result<SshHandle> {
-        let ssh_addr = self.qemu.as_ref().unwrap().ssh().await?;
-
-        SshHandle::new(
-            ssh_addr,
-            config.user.clone(),
-            config.password.clone(),
-            config.startup_timeout,
-        )
-        .await
-    }
-
-    /// Kills the inner [QemuInstance] and waits for its [Output].
-    async fn kill_qemu(mut self) -> Result<Output> {
-        let mut qemu = self.qemu.take().unwrap();
-        qemu.kill().await.ok();
-        qemu.wait().await
-    }
-
-    /// Waits for the [Output] of the inner [QemuInstance].
-    async fn wait_qemu(mut self, timeout: Duration) -> Result<Output> {
-        let timeout = Timeout::new(timeout);
-
-        loop {
-            let exited = self.qemu.as_mut().unwrap().try_wait()?.is_some();
-            if exited {
-                break self.qemu.take().unwrap().wait().await;
-            }
-            match timeout.remaining() {
-                Ok(remaining) => thread::sleep(cmp::min(remaining, Duration::from_millis(100))),
-                Err(_) => break self.kill_qemu().await,
-            }
-        }
-    }
-
-    /// Runs the given [ExecutionConfig] on the inner [QemuInstance].
-    /// The instance is shut down after the last [Action] in the config.
-    /// The [Action]s are executed as long as there is no error.
-    pub async fn run(self, config: &ExecutionConfig) -> ExecutionReport {
-        let mut ssh = match self.get_ssh_handle(config).await {
-            Ok(ssh) => ssh,
-            Err(e) => {
-                return ExecutionReport {
-                    qemu: self.kill_qemu().await,
-                    connect: Err(e.into()),
-                    actions: Default::default(),
-                    poweroff: None,
+                if let Ok(handle) = handle {
+                    return handle;
                 }
+
+                time::sleep(Duration::from_millis(100)).await;
             }
-        };
+        })
+        .await
+        .map_err(|_| io::ErrorKind::TimedOut.into());
 
-        let mut results = Vec::with_capacity(config.actions.len());
-        for action in &config.actions {
-            let res = match action {
-                Action::Exec { cmd, timeout } => ssh.exec(cmd.clone(), *timeout).await,
-                Action::Send {
-                    local,
-                    remote,
-                    mode,
-                    timeout,
-                } => ssh
-                    .send(local.clone(), remote.clone(), *mode, *timeout)
-                    .await
-                    .map(|_| Output {
-                        stdout: Default::default(),
-                        stderr: Default::default(),
-                    }),
-            };
+        Self {
+            qemu,
+            config,
+            ssh,
+            step_reports: Default::default(),
+        }
+    }
 
-            results.push(res);
-            if results.last().unwrap().is_err() {
-                break;
+    pub async fn execute(&mut self, command: String, timeout: Duration) -> bool {
+        match self.ssh.as_mut() {
+            Ok(ssh) => {
+                let description = format!("execute command '{}'", command);
+
+                let start = Instant::now();
+                let res = time::timeout(timeout, ssh.exec(command)).await;
+                let elapsed_time = start.elapsed();
+
+                let res = match res {
+                    Ok(Ok(output)) => Ok(output),
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(error.into()),
+                };
+                let is_ok = res.is_err();
+
+                self.step_reports.push(StepReport {
+                    description,
+                    elapsed_time,
+                    output: res,
+                });
+
+                is_ok
+            }
+            Err(_) => false,
+        }
+    }
+
+    pub async fn send(
+        &mut self,
+        local: PathBuf,
+        remote: PathBuf,
+        mode: i32,
+        timeout: Duration,
+    ) -> bool {
+        match self.ssh.as_mut() {
+            Ok(ssh) => {
+                let description = format!(
+                    "send file '{}' to '{}', mode 0o{:o}",
+                    local.display(),
+                    remote.display(),
+                    mode
+                );
+
+                let start = Instant::now();
+                let res = time::timeout(timeout, ssh.send(local, remote, mode)).await;
+                let elapsed_time = start.elapsed();
+
+                let res = match res {
+                    Ok(Ok(_)) => Ok(Output::default()),
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(error.into()),
+                };
+                let is_ok = res.is_err();
+
+                self.step_reports.push(StepReport {
+                    description,
+                    elapsed_time,
+                    output: res,
+                });
+
+                is_ok
+            }
+            Err(_) => false,
+        }
+    }
+
+    pub async fn finish(mut self) -> ExecutorReport {
+        let steps_ok = self.step_reports.iter().all(StepReport::success);
+        match (self.ssh.as_mut(), steps_ok) {
+            (Ok(ssh), true) => {
+                let start = Instant::now();
+                let res: Result<Result<(), io::Error>, Elapsed> =
+                    time::timeout(self.config.poweroff_timeout, async {
+                        ssh.exec(self.config.poweroff_command).await.ok();
+
+                        while self.qemu.try_wait()?.is_none() {
+                            time::sleep(Duration::from_millis(100)).await;
+                        }
+
+                        Ok(())
+                    })
+                    .await;
+                let elapsed = start.elapsed();
+
+                let output: crate::Result<Output> = match res {
+                    Ok(Ok(_)) => Ok(Output::default()),
+                    Ok(Err(error)) => {
+                        self.qemu.kill().await.ok();
+                        Err(error.into())
+                    }
+                    Err(error) => {
+                        self.qemu.kill().await.ok();
+                        Err(error.into())
+                    }
+                };
+
+                self.step_reports.push(StepReport {
+                    description: "shutdown QEMU".into(),
+                    elapsed_time: elapsed,
+                    output,
+                })
+            }
+            _ => {
+                self.qemu.kill().await.ok();
             }
         }
 
-        let kill = results.last().map(Result::is_err).unwrap_or(false);
-        let (qemu, poweroff) = if kill {
-            (self.kill_qemu().await, None)
-        } else {
-            let poweroff = ssh
-                .exec(config.poweroff_command.clone(), config.poweroff_timeout)
-                .await;
-            (
-                self.wait_qemu(config.poweroff_timeout).await,
-                Some(poweroff),
-            )
-        };
+        let image = self.qemu.image_path().to_owned();
+        let qemu = self.qemu.wait().await;
 
-        ExecutionReport {
+        ExecutorReport {
+            image,
             qemu,
-            connect: Ok(()),
-            actions: results,
-            poweroff,
+            connect: self.ssh.map(|_| ()),
+            steps: self.step_reports,
         }
     }
 }
