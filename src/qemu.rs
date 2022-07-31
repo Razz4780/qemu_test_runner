@@ -3,6 +3,7 @@ use std::{
     ffi::{OsStr, OsString},
     io,
     net::{Ipv4Addr, SocketAddr},
+    path::Path,
     path::PathBuf,
     process::{ExitStatus, Stdio},
     str::FromStr,
@@ -11,7 +12,6 @@ use std::{
 };
 use tempfile::TempDir;
 use tokio::{
-    fs,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
     process::{Child, Command},
@@ -19,34 +19,46 @@ use tokio::{
     task, time,
 };
 
+#[derive(Clone, Copy)]
+pub enum Image<'a> {
+    Qcow2(&'a Path),
+    Raw(&'a Path),
+}
+
+impl<'a> Image<'a> {
+    fn path(self) -> &'a Path {
+        match self {
+            Self::Qcow2(p) => p,
+            Self::Raw(p) => p,
+        }
+    }
+
+    fn format(self) -> &'static OsStr {
+        match self {
+            Self::Qcow2(_) => "qcow2".as_ref(),
+            Self::Raw(_) => "raw".as_ref(),
+        }
+    }
+}
+
 /// A struct for building new Qemu images.
 pub struct ImageBuilder {
     /// Command invoked to create a new image.
-    cmd: OsString,
+    pub cmd: OsString,
 }
 
 impl ImageBuilder {
-    /// Creates a new instance of this struct.
-    /// This instance will use the given `cmd` to build images.
-    pub fn new(cmd: OsString) -> Self {
-        Self { cmd }
-    }
-
-    /// Creates a new qcow2 image located at `dst` and backed by `src`.
-    pub async fn qcow2(&self, src: &OsStr, dst: &OsStr) -> Result<Output> {
-        let mut image = OsString::new();
-        image.push("backing_file=");
-        image.push(src);
-
+    /// Creates a new image located at `dst` and backed by `src`.
+    pub async fn create(&self, src: Image<'_>, dst: Image<'_>) -> Result<Output> {
         Command::new(&self.cmd)
             .arg("create")
             .arg("-f")
-            .arg("qcow2")
+            .arg(dst.format())
+            .arg("-b")
+            .arg(src.path().canonicalize()?)
             .arg("-F")
-            .arg("raw")
-            .arg("-o")
-            .arg(image)
-            .arg(dst)
+            .arg(src.format())
+            .arg(dst.path())
             .output()
             .await?
             .try_into()
@@ -80,7 +92,13 @@ impl MonitorHandle {
 
     /// Returns the number of the local port forwarded to the port 22 (standard SSH port).
     async fn ssh_port(&self) -> io::Result<u16> {
-        let mut stream = UnixStream::connect(self.socket()).await?;
+        let mut stream = {
+            let socket = self.socket();
+            while !socket.exists() {
+                time::sleep(Duration::from_millis(100)).await;
+            }
+            UnixStream::connect(socket).await?
+        };
 
         stream.write_all(b"info usernet\n").await?;
         stream.flush().await?;
@@ -89,15 +107,7 @@ impl MonitorHandle {
         let mut buffered = BufReader::new(stream);
         let mut line = String::with_capacity(1024);
 
-        loop {
-            line.clear();
-            if buffered.read_line(&mut line).await? == 0 {
-                break Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "no SSH port forward in network info received from the QEMU monitor",
-                ));
-            }
-
+        while buffered.read_line(&mut line).await? > 0 {
             let mut chunks = line.split_ascii_whitespace();
             let hostfwd = chunks
                 .next()
@@ -108,10 +118,17 @@ impl MonitorHandle {
                 let dst_port = chunks.nth(1).map(u16::from_str).transpose().ok().flatten();
 
                 if let (Some(src), Some(22)) = (src_port, dst_port) {
-                    break Ok(src);
+                    return Ok(src);
                 }
             }
+
+            line.clear();
         }
+
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            "no SSH port forward in network info received from the QEMU monitor",
+        ))
     }
 }
 
@@ -243,12 +260,7 @@ impl QemuSpawner {
     /// Spawns a new QEMU instance.
     /// The instance will use the image under the given `image_path`.
     /// This method will wait if there are too many running QEMU processes spawned with this instance.
-    /// This method will wait until the newly spawned QEMU creates a Monitor socket (but no longer than the given `monitor_timeout`).
-    pub async fn spawn(
-        &self,
-        image_path: OsString,
-        monitor_timeout: Option<Duration>,
-    ) -> Result<QemuInstance> {
+    pub async fn spawn(&self, image_path: OsString) -> Result<QemuInstance> {
         let permit = self
             .permits
             .clone()
@@ -259,21 +271,6 @@ impl QemuSpawner {
         let monitor = MonitorHandle::new()?;
         let socket = monitor.socket();
         let child = self.setup_cmd(&image_path, socket.as_os_str()).spawn()?;
-
-        if let Some(timeout) = monitor_timeout {
-            time::timeout(timeout, async move {
-                while fs::metadata(&socket).await.is_err() {
-                    time::sleep(Duration::from_millis(50)).await;
-                }
-            })
-            .await
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "waiting for the QEMU to create a Monitor socket timed out",
-                )
-            })?;
-        }
 
         Ok(QemuInstance {
             child: Some(child),
