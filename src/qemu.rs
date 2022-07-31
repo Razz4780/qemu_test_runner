@@ -1,28 +1,39 @@
-use crate::{Output, Result, Timeout};
+use crate::{Output, Result};
 use std::{
-    cmp,
     ffi::{OsStr, OsString},
-    io::{self, BufRead, BufReader, Write},
-    net::{Ipv4Addr, Shutdown, SocketAddr},
-    os::unix::net::UnixStream,
+    io,
+    net::{Ipv4Addr, SocketAddr},
     path::PathBuf,
-    process::{Child, Command},
     process::{ExitStatus, Stdio},
     str::FromStr,
-    thread,
+    sync::Arc,
     time::Duration,
 };
 use tempfile::TempDir;
+use tokio::{
+    fs,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
+    process::{Child, Command},
+    sync::{OwnedSemaphorePermit, Semaphore},
+    task, time,
+};
 
 /// A struct for building new Qemu images.
 pub struct ImageBuilder {
     /// Command invoked to create a new image.
-    pub cmd: OsString,
+    cmd: OsString,
 }
 
 impl ImageBuilder {
+    /// Creates a new instance of this struct.
+    /// This instance will use the given `cmd` to build images.
+    pub fn new(cmd: OsString) -> Self {
+        Self { cmd }
+    }
+
     /// Creates a new qcow2 image located at `dst` and backed by `src`.
-    pub fn qcow2(&self, src: &OsStr, dst: &OsStr) -> Result<Output> {
+    pub async fn qcow2(&self, src: &OsStr, dst: &OsStr) -> Result<Output> {
         let mut image = OsString::new();
         image.push("backing_file=");
         image.push(src);
@@ -36,7 +47,8 @@ impl ImageBuilder {
             .arg("-o")
             .arg(image)
             .arg(dst)
-            .output()?
+            .output()
+            .await?
             .try_into()
     }
 }
@@ -67,19 +79,19 @@ impl MonitorHandle {
     }
 
     /// Returns the number of the local port forwarded to the port 22 (standard SSH port).
-    fn ssh_port(&self) -> io::Result<u16> {
-        let mut stream = UnixStream::connect(self.socket())?;
+    async fn ssh_port(&self) -> io::Result<u16> {
+        let mut stream = UnixStream::connect(self.socket()).await?;
 
-        stream.write_all(b"info usernet\n")?;
-        stream.flush()?;
-        stream.shutdown(Shutdown::Write)?;
+        stream.write_all(b"info usernet\n").await?;
+        stream.flush().await?;
+        stream.shutdown().await?;
 
         let mut buffered = BufReader::new(stream);
         let mut line = String::with_capacity(1024);
 
         loop {
             line.clear();
-            if buffered.read_line(&mut line)? == 0 {
+            if buffered.read_line(&mut line).await? == 0 {
                 break Err(io::Error::new(
                     io::ErrorKind::Other,
                     "no SSH port forward in network info received from the QEMU monitor",
@@ -107,14 +119,15 @@ impl MonitorHandle {
 /// The instance is killed on drop.
 pub struct QemuInstance {
     child: Option<Child>,
+    permit: Option<OwnedSemaphorePermit>,
     image_path: OsString,
     monitor: MonitorHandle,
 }
 
 impl QemuInstance {
     /// Returns a [SocketAddr] for the SSH connection.
-    pub fn ssh(&self) -> io::Result<SocketAddr> {
-        let port = self.monitor.ssh_port()?;
+    pub async fn ssh(&self) -> io::Result<SocketAddr> {
+        let port = self.monitor.ssh_port().await?;
 
         Ok(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port))
     }
@@ -125,13 +138,18 @@ impl QemuInstance {
     }
 
     /// Kills the wrapped [Child].
-    pub fn kill(&mut self) -> io::Result<()> {
-        self.child.as_mut().unwrap().kill()
+    pub async fn kill(&mut self) -> io::Result<()> {
+        self.child.as_mut().unwrap().kill().await
     }
 
     /// Waits for the wrapped [Child]'s [Output].
-    pub fn wait(mut self) -> Result<Output> {
-        self.child.take().unwrap().wait_with_output()?.try_into()
+    pub async fn wait(mut self) -> Result<Output> {
+        self.child
+            .take()
+            .unwrap()
+            .wait_with_output()
+            .await?
+            .try_into()
     }
 
     /// Checks whether the wrapped [Child] has exited.
@@ -142,14 +160,19 @@ impl QemuInstance {
 
 impl Drop for QemuInstance {
     fn drop(&mut self) {
+        let permit = self.permit.take();
         if let Some(mut child) = self.child.take() {
-            child.kill().ok();
+            child.start_kill().ok();
+            task::spawn(async move {
+                let _permit = permit;
+                child.wait().await.ok();
+            });
         }
     }
 }
 
-/// A struct used to spawn new [QemuInstance]s.
-pub struct QemuSpawner {
+/// A config for spawning new [QemuInstance]s.
+pub struct QemuConfig {
     /// The command used to invoke QEMU.
     pub cmd: OsString,
     /// The memory limit for new instances (megabytes).
@@ -160,7 +183,22 @@ pub struct QemuSpawner {
     pub irqchip_off: bool,
 }
 
+/// A struct used to spawn new [QemuInstance]s.
+pub struct QemuSpawner {
+    permits: Arc<Semaphore>,
+    config: QemuConfig,
+}
+
 impl QemuSpawner {
+    /// Creates a new instance of this struct.
+    /// At any time there will be at most `children_limit` running QEMU processes spawned with this instance.
+    pub fn new(children_limit: usize, config: QemuConfig) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(children_limit)),
+            config,
+        }
+    }
+
     /// Prepares a [Command] to spawn a new instance.
     fn setup_cmd(&self, image_path: &OsStr, monitor_socket: &OsStr) -> Command {
         let mut drive = OsString::new();
@@ -172,7 +210,7 @@ impl QemuSpawner {
         monitor.push(monitor_socket);
         monitor.push(",server,nowait");
 
-        let mut cmd = Command::new(&self.cmd);
+        let mut cmd = Command::new(&self.config.cmd);
         cmd.arg("-nographic")
             .arg("-drive")
             .arg(drive)
@@ -183,15 +221,15 @@ impl QemuSpawner {
             .arg("-net")
             .arg("user,hostfwd=tcp::0-:22")
             .arg("-m")
-            .arg(format!("{}M", self.memory))
+            .arg(format!("{}M", self.config.memory))
             .arg("-monitor")
             .arg(monitor);
 
-        if self.enable_kvm {
+        if self.config.enable_kvm {
             cmd.arg("-enable-kvm");
         }
 
-        if self.irqchip_off {
+        if self.config.irqchip_off {
             cmd.arg("-machine").arg("kernel_irqchip=off");
         }
 
@@ -204,29 +242,44 @@ impl QemuSpawner {
 
     /// Spawns a new QEMU instance.
     /// The instance will use the image under the given `image_path`.
+    /// This method will wait if there are too many running QEMU processes spawned with this instance.
     /// This method will wait until the newly spawned QEMU creates a Monitor socket (but no longer than the given `monitor_timeout`).
-    pub fn spawn(
+    pub async fn spawn(
         &self,
         image_path: OsString,
         monitor_timeout: Option<Duration>,
     ) -> Result<QemuInstance> {
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore should not be closed");
+
         let monitor = MonitorHandle::new()?;
         let socket = monitor.socket();
         let child = self.setup_cmd(&image_path, socket.as_os_str()).spawn()?;
 
-        let instance = QemuInstance {
-            child: Some(child),
-            image_path,
-            monitor,
-        };
-
         if let Some(timeout) = monitor_timeout {
-            let timeout = Timeout::new(timeout);
-            while !socket.exists() {
-                thread::sleep(cmp::min(timeout.remaining()?, Duration::from_millis(50)));
-            }
+            time::timeout(timeout, async move {
+                while fs::metadata(&socket).await.is_err() {
+                    time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "waiting for the QEMU to create a Monitor socket timed out",
+                )
+            })?;
         }
 
-        Ok(instance)
+        Ok(QemuInstance {
+            child: Some(child),
+            permit: Some(permit),
+            image_path,
+            monitor,
+        })
     }
 }
