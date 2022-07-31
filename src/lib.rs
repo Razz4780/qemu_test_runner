@@ -1,4 +1,5 @@
 use std::{
+    fmt::{self, Debug, Formatter},
     io::{self, ErrorKind},
     process,
     time::{Duration, Instant},
@@ -49,12 +50,21 @@ impl Timeout {
 }
 
 /// An error that can occurr when executing a command.
-#[derive(Debug)]
 pub struct Error {
     /// An empty error probably means that the child process was killed by a signal.
     pub error: Option<io::Error>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+}
+
+impl Debug for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Error")
+            .field("error", &self.error)
+            .field("stdout", &String::from_utf8_lossy(&self.stdout[..]))
+            .field("stderr", &String::from_utf8_lossy(&self.stderr[..]))
+            .finish()
+    }
 }
 
 impl From<io::Error> for Error {
@@ -76,10 +86,18 @@ impl From<ssh2::Error> for Error {
 pub type Result<T> = core::result::Result<T, Error>;
 
 /// An output of a successful command.
-#[derive(Debug)]
 pub struct Output {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+}
+
+impl Debug for Output {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Output")
+            .field("stdout", &String::from_utf8_lossy(&self.stdout[..]))
+            .field("stderr", &String::from_utf8_lossy(&self.stderr[..]))
+            .finish()
+    }
 }
 
 impl TryFrom<process::Output> for Output {

@@ -96,7 +96,7 @@ impl Executor {
                 break self.qemu.take().unwrap().wait().await;
             }
             match timeout.remaining() {
-                Ok(remaining) => thread::sleep(cmp::min(remaining, Duration::from_secs(1))),
+                Ok(remaining) => thread::sleep(cmp::min(remaining, Duration::from_millis(100))),
                 Err(_) => break self.kill_qemu().await,
             }
         }
