@@ -107,15 +107,7 @@ impl MonitorHandle {
         let mut buffered = BufReader::new(stream);
         let mut line = String::with_capacity(1024);
 
-        loop {
-            line.clear();
-            if buffered.read_line(&mut line).await? == 0 {
-                break Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "no SSH port forward in network info received from the QEMU monitor",
-                ));
-            }
-
+        while buffered.read_line(&mut line).await? > 0 {
             let mut chunks = line.split_ascii_whitespace();
             let hostfwd = chunks
                 .next()
@@ -126,10 +118,17 @@ impl MonitorHandle {
                 let dst_port = chunks.nth(1).map(u16::from_str).transpose().ok().flatten();
 
                 if let (Some(src), Some(22)) = (src_port, dst_port) {
-                    break Ok(src);
+                    return Ok(src);
                 }
             }
+
+            line.clear();
         }
+
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            "no SSH port forward in network info received from the QEMU monitor",
+        ))
     }
 }
 
