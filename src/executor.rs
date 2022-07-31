@@ -73,17 +73,17 @@ impl ExecutorReport {
 
 /// A wrapper over a [QemuInstance].
 /// Used to interact with the instance over SSH.
-pub struct Executor {
+pub struct Executor<'a> {
     qemu: QemuInstance,
-    config: ExecutionConfig,
+    config: &'a ExecutionConfig,
     ssh: io::Result<SshHandle>,
     step_reports: Vec<StepReport>,
 }
 
-impl Executor {
+impl<'a> Executor<'a> {
     /// Creates a new instance of this struct.
     /// This instance will operate on the given [QemuInstance].
-    pub async fn new(qemu: QemuInstance, config: ExecutionConfig) -> Self {
+    pub async fn new(qemu: QemuInstance, config: &'a ExecutionConfig) -> Executor<'a> {
         let ssh = time::timeout(config.connection_timeout, async {
             loop {
                 let handle = match qemu.ssh().await {
@@ -191,7 +191,7 @@ impl Executor {
                 let start = Instant::now();
                 let res: Result<Result<(), io::Error>, Elapsed> =
                     time::timeout(self.config.poweroff_timeout, async {
-                        ssh.exec(self.config.poweroff_command).await.ok();
+                        ssh.exec(self.config.poweroff_command.clone()).await.ok();
 
                         while self.qemu.try_wait()?.is_none() {
                             time::sleep(Duration::from_millis(100)).await;
@@ -215,7 +215,7 @@ impl Executor {
                 };
 
                 self.step_reports.push(StepReport {
-                    description: "shutdown QEMU".into(),
+                    description: format!("shutdown QEMU with '{}'", self.config.poweroff_command),
                     elapsed_time: elapsed,
                     output,
                 })
