@@ -4,7 +4,6 @@ use std::{
 };
 use tokio::time::error::Elapsed;
 
-pub mod config;
 pub mod executor;
 pub mod qemu;
 pub mod ssh;

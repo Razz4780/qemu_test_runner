@@ -1,11 +1,10 @@
 use clap::Parser;
 use qemu_test_runner::{
-    config::Config,
     qemu::{ImageBuilder, QemuConfig, QemuSpawner},
-    tester::{TestReport, Tester},
+    tester::{RunConfig, TestReport, Tester},
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
@@ -48,20 +47,10 @@ struct Args {
 }
 
 fn make_tester(args: Args) -> Tester {
-    let config: Config = {
+    let config: RunConfig = {
         let bytes = fs::read(&args.suite).expect("failed to read the suite file");
         serde_json::from_slice(&bytes[..]).expect("failed to parse the suite file")
     };
-
-    let mut tests = HashMap::new();
-    for (suite_name, suite) in &config.test_suites {
-        for (test_name, test) in &suite.tests {
-            tests.insert(
-                format!("suite_{}_test_{}", suite_name, test_name),
-                test.config.clone(),
-            );
-        }
-    }
 
     Tester {
         spawner: QemuSpawner::new(
@@ -75,10 +64,7 @@ fn make_tester(args: Args) -> Tester {
         ),
         builder: ImageBuilder { cmd: args.qemu_img },
         base_image: args.minix_base,
-        build_config: config.build,
-        patch_dst: config.patch_dst,
-        execution_config: config.execution,
-        tests,
+        run_config: config,
     }
 }
 

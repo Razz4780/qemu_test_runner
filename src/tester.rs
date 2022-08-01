@@ -13,6 +13,14 @@ use std::{
 };
 use tokio::task::{self, JoinHandle};
 
+#[derive(Deserialize)]
+pub struct RunConfig {
+    pub execution: ExecutionConfig,
+    pub patch_dst: PathBuf,
+    pub build: Config,
+    pub tests: HashMap<String, Config>,
+}
+
 #[derive(Default)]
 pub struct PartialReport {
     inner: Vec<ExecutorReport>,
@@ -72,10 +80,7 @@ pub struct Tester {
     pub spawner: QemuSpawner,
     pub builder: ImageBuilder,
     pub base_image: PathBuf,
-    pub build_config: Config,
-    pub tests: HashMap<String, Config>,
-    pub patch_dst: PathBuf,
-    pub execution_config: ExecutionConfig,
+    pub run_config: RunConfig,
 }
 
 impl Tester {
@@ -84,7 +89,7 @@ impl Tester {
 
         for phase in config.phases.iter().cloned() {
             let instance = self.spawner.spawn(image.to_owned()).await?;
-            let mut executor = Executor::new(instance, &self.execution_config).await;
+            let mut executor = Executor::new(instance, &self.run_config.execution).await;
 
             for step in phase {
                 let cont = match step {
@@ -115,11 +120,11 @@ impl Tester {
         let mut res = PartialReport::default();
 
         let instance = self.spawner.spawn(image.to_owned()).await?;
-        let mut executor = Executor::new(instance, &self.execution_config).await;
+        let mut executor = Executor::new(instance, &self.run_config.execution).await;
         executor
             .send(
                 solution,
-                self.patch_dst.clone(),
+                self.run_config.patch_dst.clone(),
                 0o777,
                 Duration::from_secs(2),
             )
@@ -130,13 +135,13 @@ impl Tester {
             return Ok(res);
         }
 
-        res.join(self.try_run(image, &self.build_config).await?);
+        res.join(self.try_run(image, &self.run_config.build).await?);
 
         Ok(res)
     }
 
     async fn try_test(&self, test: &str, image: &OsStr) -> crate::Result<PartialReport> {
-        let config = self.tests.get(test).unwrap();
+        let config = self.run_config.tests.get(test).unwrap();
         self.try_run(image, config).await
     }
 
@@ -149,7 +154,7 @@ impl Tester {
 
         let patched_img = Arc::new(artifacts.join("patched.img"));
         let mut success = false;
-        for _ in 0..=self.build_config.retries {
+        for _ in 0..=self.run_config.build.retries {
             self.builder
                 .create(Image::Raw(&self.base_image), Image::Qcow2(&patched_img))
                 .await?;
@@ -165,10 +170,10 @@ impl Tester {
             }
         }
 
-        if success && !self.tests.is_empty() {
-            let mut handles = Vec::with_capacity(self.tests.len());
+        if success {
+            let mut handles = Vec::with_capacity(self.run_config.tests.len());
 
-            for test in self.tests.keys().cloned() {
+            for test in self.run_config.tests.keys().cloned() {
                 let tester = self.clone();
                 let artifacts = artifacts.clone();
                 let patched_img = patched_img.clone();
@@ -176,7 +181,7 @@ impl Tester {
                 let handle = task::spawn(async move {
                     let mut reports = Vec::new();
 
-                    let config = tester.tests.get(&test).unwrap();
+                    let config = tester.run_config.tests.get(&test).unwrap();
 
                     let mut success;
                     for i in 0..=config.retries {
