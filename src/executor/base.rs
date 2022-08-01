@@ -2,7 +2,7 @@ use super::{Config, StepReport};
 use crate::{
     qemu::QemuInstance,
     ssh::{SshCommand, SshHandle},
-    Output,
+    Error, Output,
 };
 use std::{
     ffi::{OsStr, OsString},
@@ -18,9 +18,9 @@ pub struct ExecutorReport {
     /// Path to the image used by the [QemuInstance].
     image: OsString,
     /// Output of the [QemuInstance].
-    qemu: crate::Result<Output>,
+    qemu: Result<Output, Error>,
     /// Result of creating the SSH connection.
-    connect: crate::Result<()>,
+    connect: Result<(), Error>,
     /// Reports from the executed steps.
     steps: Vec<StepReport>,
 }
@@ -30,11 +30,11 @@ impl ExecutorReport {
         &self.image
     }
 
-    pub fn qemu(&self) -> Result<&Output, &crate::Error> {
+    pub fn qemu(&self) -> Result<&Output, &Error> {
         self.qemu.as_ref()
     }
 
-    pub fn connect(&self) -> Option<&crate::Error> {
+    pub fn connect(&self) -> Option<&Error> {
         self.connect.as_ref().err()
     }
 
@@ -52,7 +52,7 @@ impl ExecutorReport {
 pub struct Executor<'a> {
     qemu: QemuInstance,
     config: &'a Config,
-    ssh: crate::Result<SshHandle>,
+    ssh: Result<SshHandle, Error>,
     step_reports: Vec<StepReport>,
 }
 
@@ -94,11 +94,7 @@ impl<'a> Executor<'a> {
         }
     }
 
-    pub async fn run(
-        &mut self,
-        step: Arc<SshCommand>,
-        timeout: Duration,
-    ) -> Result<(), &crate::Error> {
+    pub async fn run(&mut self, step: Arc<SshCommand>, timeout: Duration) -> Result<(), &Error> {
         match self.ssh.as_mut() {
             Ok(ssh) => {
                 let start = Instant::now();
@@ -155,7 +151,7 @@ impl<'a> Executor<'a> {
                     .await;
                 let elapsed = start.elapsed();
 
-                let output: crate::Result<Output> = match res {
+                let output: Result<Output, Error> = match res {
                     Ok(Ok(_)) => Ok(Output::default()),
                     Ok(Err(error)) => {
                         self.qemu.kill().await.ok();
