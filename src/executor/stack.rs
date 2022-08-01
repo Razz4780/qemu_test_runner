@@ -48,8 +48,13 @@ impl<'a> Stack<'a> {
         self.inner.run(step, timeout).await
     }
 
-    pub async fn finish(self) {
+    pub async fn finish(self) -> Result<(), &'a Error> {
         let report = self.inner.finish().await;
         self.reports.push(report);
+        self.reports
+            .last()
+            .map(ExecutorReport::ok)
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 }

@@ -91,7 +91,9 @@ impl Tester {
                 }
             }
 
-            stack.finish().await;
+            if stack.finish().await.is_err() {
+                break;
+            }
         }
 
         Ok(PartialReport {
