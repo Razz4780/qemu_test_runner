@@ -1,4 +1,5 @@
 use crate::{Error, Output, Result};
+use serde::Deserialize;
 use ssh2::Session;
 use std::{
     fmt::Display,
@@ -6,6 +7,7 @@ use std::{
     io::{self, Read},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -15,34 +17,32 @@ use tokio::{
 };
 
 /// A command that can be executed by the [SshHandle].
-#[derive(Debug)]
-enum SshCommand {
+#[derive(Debug, Deserialize, Clone)]
+pub enum SshCommand {
     /// Executing a command on the remote machine.
     Exec {
         /// Commang to be executed.
         cmd: String,
-        /// Result channel.
-        tx: oneshot::Sender<Result<Output>>,
     },
     /// Sending a file to the remote machine.
     Send {
-        /// Local path to the source file.
-        local: PathBuf,
-        /// Remote path to the destination.
-        remote: PathBuf,
+        /// Path to the source on the local machine.
+        from: PathBuf,
+        /// Path to the destination on the remote machine.
+        to: PathBuf,
         /// UNIX permissions of the destination file.
         mode: i32,
-        /// Result channel.
-        tx: oneshot::Sender<io::Result<()>>,
     },
 }
+
+struct Work(Arc<SshCommand>, oneshot::Sender<Result<Output>>);
 
 /// A worker for executing blocking functions from the [ssh2] crate.
 struct SshWorker {
     /// The active SSH session.
     session: Session,
-    /// The channel for new [SshCommand]s.
-    receiver: mpsc::Receiver<SshCommand>,
+    /// The channel for new [Work] to do.
+    receiver: mpsc::Receiver<Work>,
 }
 
 impl SshWorker {
@@ -73,19 +73,17 @@ impl SshWorker {
     /// Runs this worker until all of the related [SshCommand] [mpsc::Sender]s are dropped.
     /// This is a blocking method.
     fn run(mut self) {
-        while let Some(command) = self.receiver.blocking_recv() {
-            match command {
-                SshCommand::Exec { cmd, tx } => {
-                    let res = self.exec(&cmd);
+        while let Some(Work(command, tx)) = self.receiver.blocking_recv() {
+            match &*command {
+                SshCommand::Exec { cmd } => {
+                    let res = self.exec(cmd);
                     tx.send(res).ok();
                 }
-                SshCommand::Send {
-                    local,
-                    remote,
-                    mode,
-                    tx,
-                } => {
-                    let res = self.send(&local, &remote, mode);
+                SshCommand::Send { from, to, mode } => {
+                    let res = self
+                        .send(from, to, *mode)
+                        .map(|_| Output::default())
+                        .map_err(Into::into);
                     tx.send(res).ok();
                 }
             }
@@ -137,8 +135,8 @@ impl SshWorker {
 }
 
 pub struct SshHandle {
-    /// The channel for sending [SshCommand]s to the worker.
-    sender: mpsc::Sender<SshCommand>,
+    /// The channel for sending [Work] to the worker.
+    sender: mpsc::Sender<Work>,
 }
 
 impl SshHandle {
@@ -186,32 +184,15 @@ impl SshHandle {
         )
     }
 
-    /// Executes a command on the remote machine.
-    pub async fn exec(&mut self, cmd: String) -> Result<Output> {
+    /// Executes an [SshCommand] on the remote machine.
+    pub async fn exec(&mut self, cmd: Arc<SshCommand>) -> Result<Output> {
         let (tx, rx) = oneshot::channel();
 
         self.sender
-            .send(SshCommand::Exec { cmd, tx })
+            .send(Work(cmd, tx))
             .await
             .map_err(Self::worker_died)?;
 
         rx.await.map_err(Self::worker_died)?
-    }
-
-    /// Transfers a file to the remote machine.
-    pub async fn send(&mut self, local: PathBuf, remote: PathBuf, mode: i32) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-
-        self.sender
-            .send(SshCommand::Send {
-                local,
-                remote,
-                mode,
-                tx,
-            })
-            .await
-            .map_err(Self::worker_died)?;
-
-        rx.await.map_err(Self::worker_died)?.map_err(Into::into)
     }
 }

@@ -1,6 +1,11 @@
 use crate::{
-    executor::base::{ExecutionConfig, Executor, ExecutorReport},
+    executor::{
+        base::{Executor, ExecutorReport},
+        Config as ExecutorConfig,
+    },
     qemu::{Image, ImageBuilder, QemuSpawner},
+    ssh::SshCommand,
+    DurationMs,
 };
 use serde::Deserialize;
 use std::{
@@ -15,7 +20,7 @@ use tokio::task::{self, JoinHandle};
 
 #[derive(Deserialize)]
 pub struct RunConfig {
-    pub execution: ExecutionConfig,
+    pub execution: ExecutorConfig,
     pub patch_dst: PathBuf,
     pub build: Config,
     pub tests: HashMap<String, Config>,
@@ -56,24 +61,10 @@ impl TestReport {
     }
 }
 
-#[derive(Clone, Deserialize)]
-pub enum Step {
-    Cmd {
-        command: String,
-        timeout: Duration,
-    },
-    Send {
-        local: PathBuf,
-        remote: PathBuf,
-        mode: i32,
-        timeout: Duration,
-    },
-}
-
 #[derive(Deserialize, Clone)]
 pub struct Config {
     retries: usize,
-    phases: Vec<Vec<Step>>,
+    phases: Vec<Vec<(SshCommand, DurationMs)>>,
 }
 
 pub struct Tester {
@@ -91,18 +82,8 @@ impl Tester {
             let instance = self.spawner.spawn(image.to_owned()).await?;
             let mut executor = Executor::new(instance, &self.run_config.execution).await;
 
-            for step in phase {
-                let cont = match step {
-                    Step::Cmd { command, timeout } => executor.execute(command, timeout).await,
-                    Step::Send {
-                        local,
-                        remote,
-                        mode,
-                        timeout,
-                    } => executor.send(local, remote, mode, timeout).await,
-                };
-
-                if !cont {
+            for (step, timeout) in phase {
+                if executor.run(step.into(), timeout.into()).await.is_err() {
                     break;
                 }
             }
@@ -122,13 +103,16 @@ impl Tester {
         let instance = self.spawner.spawn(image.to_owned()).await?;
         let mut executor = Executor::new(instance, &self.run_config.execution).await;
         executor
-            .send(
-                solution,
-                self.run_config.patch_dst.clone(),
-                0o777,
+            .run(
+                Arc::new(SshCommand::Send {
+                    from: solution,
+                    to: self.run_config.patch_dst.clone(),
+                    mode: 0o777,
+                }),
                 Duration::from_secs(2),
             )
-            .await;
+            .await
+            .ok();
         res.push(executor.finish().await);
 
         if !res.success() {
