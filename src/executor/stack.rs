@@ -10,7 +10,7 @@ pub struct StackExecutor<'a> {
 }
 
 impl<'a> StackExecutor<'a> {
-    pub async fn new(
+    pub fn new(
         config: &'a Config,
         spawner: &'a QemuSpawner,
         image: &'a OsStr,
@@ -23,7 +23,7 @@ impl<'a> StackExecutor<'a> {
         }
     }
 
-    pub async fn open_stack(&'a mut self) -> Result<Stack<'a>, Error> {
+    pub async fn open_stack(&mut self) -> Result<Stack<'_>, Error> {
         let qemu = self.spawner.spawn(self.image.to_owned()).await?;
         let inner = BaseExecutor::new(qemu, self.config).await;
 
@@ -33,7 +33,7 @@ impl<'a> StackExecutor<'a> {
         })
     }
 
-    pub async fn finish(self) -> Vec<ExecutorReport> {
+    pub fn finish(self) -> Vec<ExecutorReport> {
         self.reports
     }
 }

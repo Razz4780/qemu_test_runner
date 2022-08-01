@@ -1,5 +1,7 @@
 use crate::{
-    executor::{base::BaseExecutor, Config as ExecutorConfig, ExecutorReport},
+    executor::{
+        base::BaseExecutor, stack::StackExecutor, Config as ExecutorConfig, ExecutorReport,
+    },
     qemu::{Image, ImageBuilder, QemuSpawner},
     ssh::SshCommand,
     DurationMs, Error,
@@ -77,25 +79,24 @@ pub struct Tester {
 
 impl Tester {
     async fn try_run(&self, image: &OsStr, config: &Config) -> crate::Result<PartialReport> {
-        let mut res = PartialReport::default();
+        let mut executor = StackExecutor::new(&self.run_config.execution, &self.spawner, image);
 
         for phase in config.phases.iter().cloned() {
-            let instance = self.spawner.spawn(image.to_owned()).await?;
-            let mut executor = BaseExecutor::new(instance, &self.run_config.execution).await;
+            let mut stack = executor.open_stack().await?;
 
             for (step, timeout) in phase {
-                if executor.run(step.into(), timeout.into()).await.is_err() {
+                let stop = stack.run(step.into(), timeout.into()).await.is_err();
+                if stop {
                     break;
                 }
             }
 
-            res.push(executor.finish().await);
-            if res.ok().is_err() {
-                break;
-            }
+            stack.finish().await;
         }
 
-        Ok(res)
+        Ok(PartialReport {
+            inner: executor.finish(),
+        })
     }
 
     async fn try_build(&self, solution: PathBuf, image: &OsStr) -> crate::Result<PartialReport> {
