@@ -1,5 +1,5 @@
 use crate::{
-    executor::{base::Executor, Config as ExecutorConfig, ExecutorReport},
+    executor::{base::BaseExecutor, Config as ExecutorConfig, ExecutorReport},
     qemu::{Image, ImageBuilder, QemuSpawner},
     ssh::SshCommand,
     DurationMs, Error,
@@ -81,7 +81,7 @@ impl Tester {
 
         for phase in config.phases.iter().cloned() {
             let instance = self.spawner.spawn(image.to_owned()).await?;
-            let mut executor = Executor::new(instance, &self.run_config.execution).await;
+            let mut executor = BaseExecutor::new(instance, &self.run_config.execution).await;
 
             for (step, timeout) in phase {
                 if executor.run(step.into(), timeout.into()).await.is_err() {
@@ -102,7 +102,7 @@ impl Tester {
         let mut res = PartialReport::default();
 
         let instance = self.spawner.spawn(image.to_owned()).await?;
-        let mut executor = Executor::new(instance, &self.run_config.execution).await;
+        let mut executor = BaseExecutor::new(instance, &self.run_config.execution).await;
         executor
             .run(
                 Arc::new(SshCommand::Send {

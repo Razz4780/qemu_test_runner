@@ -13,17 +13,17 @@ use tokio::time::{self, error::Elapsed};
 
 /// A wrapper over a [QemuInstance].
 /// Used to interact with the instance over SSH.
-pub struct Executor<'a> {
+pub struct BaseExecutor<'a> {
     qemu: QemuInstance,
     config: &'a Config,
     ssh: Result<SshHandle, Error>,
     reports: Vec<StepReport>,
 }
 
-impl<'a> Executor<'a> {
+impl<'a> BaseExecutor<'a> {
     /// Creates a new instance of this struct.
     /// This instance will operate on the given [QemuInstance].
-    pub async fn new(qemu: QemuInstance, config: &'a Config) -> Executor<'a> {
+    pub async fn new(qemu: QemuInstance, config: &'a Config) -> BaseExecutor<'a> {
         let ssh = time::timeout(config.connection_timeout.into(), async {
             loop {
                 let handle = match qemu.ssh().await {
@@ -53,33 +53,30 @@ impl<'a> Executor<'a> {
     }
 
     pub async fn run(&mut self, step: Arc<SshCommand>, timeout: Duration) -> Result<(), &Error> {
-        match self.ssh.as_mut() {
-            Ok(ssh) => {
-                let start = Instant::now();
+        let ssh = self.ssh.as_mut()?;
 
-                let res = time::timeout(timeout, ssh.exec(step.clone())).await;
-                let elapsed_time = start.elapsed();
-                let output = match res {
-                    Ok(Ok(output)) => Ok(output),
-                    Ok(Err(error)) => Err(error),
-                    Err(error) => Err(error.into()),
-                };
+        let start = Instant::now();
 
-                self.reports.push(StepReport {
-                    cmd: step,
-                    timeout,
-                    elapsed_time,
-                    output,
-                });
+        let res = time::timeout(timeout, ssh.exec(step.clone())).await;
+        let elapsed_time = start.elapsed();
+        let output = match res {
+            Ok(Ok(output)) => Ok(output),
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(error.into()),
+        };
 
-                self.reports
-                    .last()
-                    .map(StepReport::ok)
-                    .transpose()
-                    .map(Option::unwrap_or_default)
-            }
-            Err(e) => Err(e),
-        }
+        self.reports.push(StepReport {
+            cmd: step,
+            timeout,
+            elapsed_time,
+            output,
+        });
+
+        self.reports
+            .last()
+            .map(StepReport::ok)
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 
     pub async fn finish(mut self) -> ExecutorReport {

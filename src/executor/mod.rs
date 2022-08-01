@@ -7,7 +7,7 @@ use std::{
 };
 
 pub mod base;
-pub mod stacking;
+pub mod stack;
 
 /// Config for running a sequence of actions on a [crate::qemu::QemuInstance].
 #[derive(Deserialize)]

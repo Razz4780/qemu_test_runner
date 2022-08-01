@@ -64,6 +64,12 @@ impl From<Elapsed> for Error {
     }
 }
 
+impl<'a> From<&'a mut Error> for &'a Error {
+    fn from(error: &'a mut Error) -> Self {
+        error
+    }
+}
+
 pub type Result<T> = core::result::Result<T, Error>;
 
 /// An output of a successful command.
