@@ -5,7 +5,7 @@ use qemu_test_runner::{
     tester::{TestReport, Tester},
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
@@ -53,16 +53,6 @@ fn make_tester(args: Args) -> Tester {
         serde_json::from_slice(&bytes[..]).expect("failed to parse the suite file")
     };
 
-    let mut tests = HashMap::new();
-    for (suite_name, suite) in &config.test_suites {
-        for (test_name, test) in &suite.tests {
-            tests.insert(
-                format!("suite_{}_test_{}", suite_name, test_name),
-                test.config.clone(),
-            );
-        }
-    }
-
     Tester {
         spawner: QemuSpawner::new(
             args.concurrency,
@@ -78,7 +68,7 @@ fn make_tester(args: Args) -> Tester {
         build_config: config.build,
         patch_dst: config.patch_dst,
         execution_config: config.execution,
-        tests,
+        tests: config.tests,
     }
 }
 
