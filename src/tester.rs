@@ -1,5 +1,5 @@
 use crate::{
-    executor::{ExecutionConfig, Executor, ExecutorReport},
+    executor::base::{ExecutionConfig, Executor, ExecutorReport},
     qemu::{Image, ImageBuilder, QemuSpawner},
 };
 use serde::Deserialize;
