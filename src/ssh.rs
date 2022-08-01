@@ -1,4 +1,5 @@
 use crate::{Error, Output, Result};
+use serde::Deserialize;
 use ssh2::Session;
 use std::{
     fmt::Display,
@@ -6,6 +7,7 @@ use std::{
     io::{self, Read},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -15,55 +17,42 @@ use tokio::{
 };
 
 /// A command that can be executed by the [SshHandle].
-#[derive(Debug)]
-enum SshCommand {
+#[derive(Debug, Deserialize, Clone)]
+pub enum SshCommand {
     /// Executing a command on the remote machine.
     Exec {
         /// Commang to be executed.
         cmd: String,
-        /// Result channel.
-        tx: oneshot::Sender<Result<Output>>,
     },
     /// Sending a file to the remote machine.
     Send {
-        /// Local path to the source file.
-        local: PathBuf,
-        /// Remote path to the destination.
-        remote: PathBuf,
+        /// Path to the source on the local machine.
+        from: PathBuf,
+        /// Path to the destination on the remote machine.
+        to: PathBuf,
         /// UNIX permissions of the destination file.
         mode: i32,
-        /// Result channel.
-        tx: oneshot::Sender<io::Result<()>>,
     },
 }
+
+struct Work(Arc<SshCommand>, oneshot::Sender<Result<Output>>);
 
 /// A worker for executing blocking functions from the [ssh2] crate.
 struct SshWorker {
     /// The active SSH session.
     session: Session,
-    /// The channel for new [SshCommand]s.
-    receiver: mpsc::Receiver<SshCommand>,
+    /// The channel for new [Work] to do.
+    receiver: mpsc::Receiver<Work>,
 }
 
 impl SshWorker {
     /// Opens a new [Session] with the given parameters.
     /// This is a blocking method.
-    fn open_session(
-        addr: SocketAddr,
-        username: &str,
-        password: &str,
-        blocking_call_timeout: Duration,
-    ) -> io::Result<Session> {
-        let conn = TcpStream::connect_timeout(&addr, blocking_call_timeout)?;
+    fn open_session(addr: SocketAddr, username: &str, password: &str) -> io::Result<Session> {
+        let conn = TcpStream::connect(&addr)?;
 
         let mut session = Session::new()?;
         session.set_tcp_stream(conn);
-        session.set_timeout(
-            blocking_call_timeout
-                .as_millis()
-                .try_into()
-                .unwrap_or(u32::MAX),
-        );
         session.handshake()?;
         session.userauth_password(username, password)?;
 
@@ -73,19 +62,17 @@ impl SshWorker {
     /// Runs this worker until all of the related [SshCommand] [mpsc::Sender]s are dropped.
     /// This is a blocking method.
     fn run(mut self) {
-        while let Some(command) = self.receiver.blocking_recv() {
-            match command {
-                SshCommand::Exec { cmd, tx } => {
-                    let res = self.exec(&cmd);
+        while let Some(Work(command, tx)) = self.receiver.blocking_recv() {
+            match &*command {
+                SshCommand::Exec { cmd } => {
+                    let res = self.exec(cmd);
                     tx.send(res).ok();
                 }
-                SshCommand::Send {
-                    local,
-                    remote,
-                    mode,
-                    tx,
-                } => {
-                    let res = self.send(&local, &remote, mode);
+                SshCommand::Send { from, to, mode } => {
+                    let res = self
+                        .send(from, to, *mode)
+                        .map(|_| Output::default())
+                        .map_err(Into::into);
                     tx.send(res).ok();
                 }
             }
@@ -137,20 +124,15 @@ impl SshWorker {
 }
 
 pub struct SshHandle {
-    /// The channel for sending [SshCommand]s to the worker.
-    sender: mpsc::Sender<SshCommand>,
+    /// The channel for sending [Work] to the worker.
+    sender: mpsc::Sender<Work>,
 }
 
 impl SshHandle {
     /// Creates a new instance of this struct.
-    pub async fn new(
-        addr: SocketAddr,
-        username: String,
-        password: String,
-        blocking_call_timeout: Duration,
-    ) -> io::Result<Self> {
+    pub async fn new(addr: SocketAddr, username: String, password: String) -> io::Result<Self> {
         let session = task::spawn_blocking(move || loop {
-            let res = SshWorker::open_session(addr, &username, &password, blocking_call_timeout);
+            let res = SshWorker::open_session(addr, &username, &password);
             if let Ok(session) = res {
                 break session;
             }
@@ -186,32 +168,15 @@ impl SshHandle {
         )
     }
 
-    /// Executes a command on the remote machine.
-    pub async fn exec(&mut self, cmd: String) -> Result<Output> {
+    /// Executes an [SshCommand] on the remote machine.
+    pub async fn exec(&mut self, cmd: Arc<SshCommand>) -> Result<Output> {
         let (tx, rx) = oneshot::channel();
 
         self.sender
-            .send(SshCommand::Exec { cmd, tx })
+            .send(Work(cmd, tx))
             .await
             .map_err(Self::worker_died)?;
 
         rx.await.map_err(Self::worker_died)?
-    }
-
-    /// Transfers a file to the remote machine.
-    pub async fn send(&mut self, local: PathBuf, remote: PathBuf, mode: i32) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-
-        self.sender
-            .send(SshCommand::Send {
-                local,
-                remote,
-                mode,
-                tx,
-            })
-            .await
-            .map_err(Self::worker_died)?;
-
-        rx.await.map_err(Self::worker_died)?.map_err(Into::into)
     }
 }

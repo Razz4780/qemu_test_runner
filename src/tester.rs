@@ -1,6 +1,10 @@
 use crate::{
-    executor::{ExecutionConfig, Executor, ExecutorReport},
+    executor::{
+        base::BaseExecutor, stack::StackExecutor, Config as ExecutorConfig, ExecutorReport,
+    },
     qemu::{Image, ImageBuilder, QemuSpawner},
+    ssh::SshCommand,
+    DurationMs, Error,
 };
 use serde::Deserialize;
 use std::{
@@ -15,7 +19,7 @@ use tokio::task::{self, JoinHandle};
 
 #[derive(Deserialize)]
 pub struct RunConfig {
-    pub execution: ExecutionConfig,
+    pub execution: ExecutorConfig,
     pub patch_dst: PathBuf,
     pub build: Config,
     pub tests: HashMap<String, Config>,
@@ -31,8 +35,12 @@ impl PartialReport {
         self.inner.push(report)
     }
 
-    fn success(&self) -> bool {
-        self.inner.iter().all(ExecutorReport::success)
+    fn ok(&self) -> Result<(), &Error> {
+        self.inner
+            .last()
+            .map(ExecutorReport::ok)
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 
     fn join(&mut self, other: PartialReport) {
@@ -56,24 +64,10 @@ impl TestReport {
     }
 }
 
-#[derive(Clone, Deserialize)]
-pub enum Step {
-    Cmd {
-        command: String,
-        timeout: Duration,
-    },
-    Send {
-        local: PathBuf,
-        remote: PathBuf,
-        mode: i32,
-        timeout: Duration,
-    },
-}
-
 #[derive(Deserialize, Clone)]
 pub struct Config {
     retries: usize,
-    phases: Vec<Vec<Step>>,
+    phases: Vec<Vec<(SshCommand, DurationMs)>>,
 }
 
 pub struct Tester {
@@ -85,53 +79,47 @@ pub struct Tester {
 
 impl Tester {
     async fn try_run(&self, image: &OsStr, config: &Config) -> crate::Result<PartialReport> {
-        let mut res = PartialReport::default();
+        let mut executor = StackExecutor::new(&self.run_config.execution, &self.spawner, image);
 
         for phase in config.phases.iter().cloned() {
-            let instance = self.spawner.spawn(image.to_owned()).await?;
-            let mut executor = Executor::new(instance, &self.run_config.execution).await;
+            let mut stack = executor.open_stack().await?;
 
-            for step in phase {
-                let cont = match step {
-                    Step::Cmd { command, timeout } => executor.execute(command, timeout).await,
-                    Step::Send {
-                        local,
-                        remote,
-                        mode,
-                        timeout,
-                    } => executor.send(local, remote, mode, timeout).await,
-                };
-
-                if !cont {
+            for (step, timeout) in phase {
+                let stop = stack.run(step.into(), timeout.into()).await.is_err();
+                if stop {
                     break;
                 }
             }
 
-            res.push(executor.finish().await);
-            if !res.success() {
+            if stack.finish().await.is_err() {
                 break;
             }
         }
 
-        Ok(res)
+        Ok(PartialReport {
+            inner: executor.finish(),
+        })
     }
 
     async fn try_build(&self, solution: PathBuf, image: &OsStr) -> crate::Result<PartialReport> {
         let mut res = PartialReport::default();
 
         let instance = self.spawner.spawn(image.to_owned()).await?;
-        let mut executor = Executor::new(instance, &self.run_config.execution).await;
+        let mut executor = BaseExecutor::new(instance, &self.run_config.execution).await;
         executor
-            .send(
-                solution,
-                self.run_config.patch_dst.clone(),
-                0o777,
+            .run(
+                Arc::new(SshCommand::Send {
+                    from: solution,
+                    to: self.run_config.patch_dst.clone(),
+                    mode: 0o777,
+                }),
                 Duration::from_secs(2),
             )
-            .await;
+            .await
+            .ok();
         res.push(executor.finish().await);
 
-        if !res.success() {
+        if res.ok().is_err() {
             return Ok(res);
         }
 
@@ -162,7 +150,7 @@ impl Tester {
                 .try_build(solution.to_path_buf(), patched_img.as_os_str())
                 .await?;
 
-            success = report.success();
+            success = report.ok().is_ok();
             res.build.push(report);
 
             if success {
@@ -197,7 +185,7 @@ impl Tester {
                         let res = tester.try_test(&test, img.as_os_str()).await;
                         match res {
                             Ok(report) => {
-                                success = report.success();
+                                success = report.ok().is_ok();
                                 reports.push(report);
 
                                 if success {

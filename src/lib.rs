@@ -1,6 +1,8 @@
+use serde::Deserialize;
 use std::{
     fmt::{self, Debug, Formatter},
     io, process,
+    time::Duration,
 };
 use tokio::time::error::Elapsed;
 
@@ -8,6 +10,15 @@ pub mod executor;
 pub mod qemu;
 pub mod ssh;
 pub mod tester;
+
+#[derive(Deserialize, Debug, Clone, Copy)]
+pub struct DurationMs(u64);
+
+impl From<DurationMs> for Duration {
+    fn from(millis: DurationMs) -> Self {
+        Self::from_millis(millis.0)
+    }
+}
 
 /// An error that can occurr when executing a command.
 pub struct Error {
@@ -50,6 +61,12 @@ impl From<Elapsed> for Error {
             stdout: Default::default(),
             stderr: Default::default(),
         }
+    }
+}
+
+impl<'a> From<&'a mut Error> for &'a Error {
+    fn from(error: &'a mut Error) -> Self {
+        error
     }
 }
 
