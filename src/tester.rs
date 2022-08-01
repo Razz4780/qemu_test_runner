@@ -1,11 +1,8 @@
 use crate::{
-    executor::{
-        base::{Executor, ExecutorReport},
-        Config as ExecutorConfig,
-    },
+    executor::{base::Executor, Config as ExecutorConfig, ExecutorReport},
     qemu::{Image, ImageBuilder, QemuSpawner},
     ssh::SshCommand,
-    DurationMs,
+    DurationMs, Error,
 };
 use serde::Deserialize;
 use std::{
@@ -36,8 +33,12 @@ impl PartialReport {
         self.inner.push(report)
     }
 
-    fn success(&self) -> bool {
-        self.inner.iter().all(ExecutorReport::success)
+    fn ok(&self) -> Result<(), &Error> {
+        self.inner
+            .last()
+            .map(ExecutorReport::ok)
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 
     fn join(&mut self, other: PartialReport) {
@@ -89,7 +90,7 @@ impl Tester {
             }
 
             res.push(executor.finish().await);
-            if !res.success() {
+            if res.ok().is_err() {
                 break;
             }
         }
@@ -115,7 +116,7 @@ impl Tester {
             .ok();
         res.push(executor.finish().await);
 
-        if !res.success() {
+        if res.ok().is_err() {
             return Ok(res);
         }
 
@@ -146,7 +147,7 @@ impl Tester {
                 .try_build(solution.to_path_buf(), patched_img.as_os_str())
                 .await?;
 
-            success = report.success();
+            success = report.ok().is_ok();
             res.build.push(report);
 
             if success {
@@ -181,7 +182,7 @@ impl Tester {
                         let res = tester.try_test(&test, img.as_os_str()).await;
                         match res {
                             Ok(report) => {
-                                success = report.success();
+                                success = report.ok().is_ok();
                                 reports.push(report);
 
                                 if success {

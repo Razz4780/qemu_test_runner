@@ -1,51 +1,15 @@
-use super::{Config, StepReport};
+use super::{Config, ExecutorReport, StepReport};
 use crate::{
     qemu::QemuInstance,
     ssh::{SshCommand, SshHandle},
     Error, Output,
 };
 use std::{
-    ffi::{OsStr, OsString},
     io,
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::time::{self, error::Elapsed};
-
-/// A report from executing a sequence of actions on a [QemuInstance].
-#[derive(Debug)]
-pub struct ExecutorReport {
-    /// Path to the image used by the [QemuInstance].
-    image: OsString,
-    /// Output of the [QemuInstance].
-    qemu: Result<Output, Error>,
-    /// Result of creating the SSH connection.
-    connect: Result<(), Error>,
-    /// Reports from the executed steps.
-    steps: Vec<StepReport>,
-}
-
-impl ExecutorReport {
-    pub fn image(&self) -> &OsStr {
-        &self.image
-    }
-
-    pub fn qemu(&self) -> Result<&Output, &Error> {
-        self.qemu.as_ref()
-    }
-
-    pub fn connect(&self) -> Option<&Error> {
-        self.connect.as_ref().err()
-    }
-
-    pub fn steps(&self) -> &[StepReport] {
-        &self.steps[..]
-    }
-
-    pub fn success(&self) -> bool {
-        self.qemu.is_ok() && self.connect.is_ok() && self.steps.iter().all(StepReport::success)
-    }
-}
 
 /// A wrapper over a [QemuInstance].
 /// Used to interact with the instance over SSH.
@@ -53,7 +17,7 @@ pub struct Executor<'a> {
     qemu: QemuInstance,
     config: &'a Config,
     ssh: Result<SshHandle, Error>,
-    step_reports: Vec<StepReport>,
+    reports: Vec<StepReport>,
 }
 
 impl<'a> Executor<'a> {
@@ -84,7 +48,7 @@ impl<'a> Executor<'a> {
             qemu,
             config,
             ssh,
-            step_reports: Default::default(),
+            reports: Default::default(),
         }
     }
 
@@ -101,18 +65,18 @@ impl<'a> Executor<'a> {
                     Err(error) => Err(error.into()),
                 };
 
-                self.step_reports.push(StepReport {
+                self.reports.push(StepReport {
                     cmd: step,
                     timeout,
                     elapsed_time,
                     output,
                 });
 
-                self.step_reports
+                self.reports
                     .last()
-                    .map(|report| report.output.as_ref())
+                    .map(StepReport::ok)
                     .transpose()
-                    .map(|_| ())
+                    .map(Option::unwrap_or_default)
             }
             Err(e) => Err(e),
         }
@@ -120,7 +84,7 @@ impl<'a> Executor<'a> {
 
     pub async fn finish(mut self) -> ExecutorReport {
         let steps_ok = self
-            .step_reports
+            .reports
             .last()
             .map(|report| report.output.is_ok())
             .unwrap_or(true);
@@ -157,7 +121,7 @@ impl<'a> Executor<'a> {
                     }
                 };
 
-                self.step_reports.push(StepReport {
+                self.reports.push(StepReport {
                     cmd,
                     timeout: self.config.poweroff_timeout.into(),
                     elapsed_time: elapsed,
@@ -176,7 +140,7 @@ impl<'a> Executor<'a> {
             image,
             qemu,
             connect: self.ssh.map(|_| ()),
-            steps: self.step_reports,
+            steps: self.reports,
         }
     }
 }

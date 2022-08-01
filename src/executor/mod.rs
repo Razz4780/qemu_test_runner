@@ -1,8 +1,13 @@
-use crate::{ssh::SshCommand, DurationMs, Output, Result};
+use crate::{ssh::SshCommand, DurationMs, Error, Output};
 use serde::Deserialize;
-use std::{sync::Arc, time::Duration};
+use std::{
+    ffi::{OsStr, OsString},
+    sync::Arc,
+    time::Duration,
+};
 
 pub mod base;
+pub mod stacking;
 
 /// Config for running a sequence of actions on a [crate::qemu::QemuInstance].
 #[derive(Deserialize)]
@@ -17,8 +22,6 @@ pub struct Config {
     pub poweroff_timeout: DurationMs,
     /// The command that will be used to shutdown the [crate::qemu::QemuInstance].
     pub poweroff_command: String,
-    /// Timeout for blocking libssh2 calls (milliseconds).
-    pub blocking_ssh_calls_timeout: DurationMs,
 }
 
 #[derive(Debug)]
@@ -26,11 +29,48 @@ pub struct StepReport {
     pub cmd: Arc<SshCommand>,
     pub timeout: Duration,
     pub elapsed_time: Duration,
-    pub output: Result<Output>,
+    pub output: Result<Output, Error>,
 }
 
 impl StepReport {
-    fn success(&self) -> bool {
-        self.output.is_ok()
+    fn ok(&self) -> Result<(), &Error> {
+        self.output.as_ref().map(|_| ())
+    }
+}
+
+/// A report from executing a sequence of actions on a [QemuInstance].
+#[derive(Debug)]
+pub struct ExecutorReport {
+    /// Path to the image used by the [QemuInstance].
+    image: OsString,
+    /// Output of the [QemuInstance].
+    qemu: Result<Output, Error>,
+    /// Result of creating the SSH connection.
+    connect: Result<(), Error>,
+    /// Reports from the executed steps.
+    steps: Vec<StepReport>,
+}
+
+impl ExecutorReport {
+    pub fn image(&self) -> &OsStr {
+        &self.image
+    }
+
+    pub fn qemu(&self) -> Result<&Output, &Error> {
+        self.qemu.as_ref()
+    }
+
+    pub fn connect(&self) -> Option<&Error> {
+        self.connect.as_ref().err()
+    }
+
+    pub fn steps(&self) -> &[StepReport] {
+        &self.steps[..]
+    }
+
+    pub fn ok(&self) -> Result<(), &Error> {
+        self.connect.as_ref()?;
+        self.steps.last().map(StepReport::ok).transpose()?;
+        self.qemu.as_ref().map(|_| ())
     }
 }
