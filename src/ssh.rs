@@ -48,22 +48,11 @@ struct SshWorker {
 impl SshWorker {
     /// Opens a new [Session] with the given parameters.
     /// This is a blocking method.
-    fn open_session(
-        addr: SocketAddr,
-        username: &str,
-        password: &str,
-        blocking_call_timeout: Duration,
-    ) -> io::Result<Session> {
-        let conn = TcpStream::connect_timeout(&addr, blocking_call_timeout)?;
+    fn open_session(addr: SocketAddr, username: &str, password: &str) -> io::Result<Session> {
+        let conn = TcpStream::connect(&addr)?;
 
         let mut session = Session::new()?;
         session.set_tcp_stream(conn);
-        session.set_timeout(
-            blocking_call_timeout
-                .as_millis()
-                .try_into()
-                .unwrap_or(u32::MAX),
-        );
         session.handshake()?;
         session.userauth_password(username, password)?;
 
@@ -141,14 +130,9 @@ pub struct SshHandle {
 
 impl SshHandle {
     /// Creates a new instance of this struct.
-    pub async fn new(
-        addr: SocketAddr,
-        username: String,
-        password: String,
-        blocking_call_timeout: Duration,
-    ) -> io::Result<Self> {
+    pub async fn new(addr: SocketAddr, username: String, password: String) -> io::Result<Self> {
         let session = task::spawn_blocking(move || loop {
-            let res = SshWorker::open_session(addr, &username, &password, blocking_call_timeout);
+            let res = SshWorker::open_session(addr, &username, &password);
             if let Ok(session) = res {
                 break session;
             }

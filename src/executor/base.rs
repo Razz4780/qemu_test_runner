@@ -64,13 +64,7 @@ impl<'a> Executor<'a> {
             loop {
                 let handle = match qemu.ssh().await {
                     Ok(addr) => {
-                        SshHandle::new(
-                            addr,
-                            config.user.clone(),
-                            config.password.clone(),
-                            config.blocking_ssh_calls_timeout.into(),
-                        )
-                        .await
+                        SshHandle::new(addr, config.user.clone(), config.password.clone()).await
                     }
                     Err(error) => Err(error),
                 };
