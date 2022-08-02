@@ -1,74 +1,93 @@
 use crate::{
-    executor::{
-        base::BaseExecutor, stack::StackExecutor, Config as ExecutorConfig, ExecutorReport,
-    },
+    executor::{stack::StackExecutor, ExecutorConfig, ExecutorReport},
     qemu::{Image, ImageBuilder, QemuSpawner},
-    ssh::SshCommand,
-    DurationMs, Error,
+    ssh::SshAction,
+    Error,
 };
-use serde::Deserialize;
 use std::{
     collections::HashMap,
-    ffi::OsStr,
-    io,
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
-use tokio::task::{self, JoinHandle};
+use tokio::{
+    fs,
+    task::{self, JoinHandle},
+};
 
-#[derive(Deserialize)]
-pub struct RunConfig {
-    pub execution: ExecutorConfig,
-    pub patch_dst: PathBuf,
-    pub build: Config,
-    pub tests: HashMap<String, Config>,
+pub enum Step {
+    Action {
+        action: SshAction,
+        timeout: Duration,
+    },
+    TransferPatch {
+        to: PathBuf,
+        mode: i32,
+        timeout: Duration,
+    },
 }
 
-#[derive(Default)]
-pub struct PartialReport {
-    inner: Vec<ExecutorReport>,
-}
-
-impl PartialReport {
-    fn push(&mut self, report: ExecutorReport) {
-        self.inner.push(report)
+impl Step {
+    fn action(&self, patch: &Path) -> SshAction {
+        match self {
+            Self::Action { action, .. } => action.clone(),
+            Self::TransferPatch { to, mode, .. } => SshAction::Send {
+                from: patch.to_path_buf(),
+                to: to.clone(),
+                mode: *mode,
+            },
+        }
     }
 
-    fn ok(&self) -> Result<(), &Error> {
-        self.inner
-            .last()
-            .map(ExecutorReport::ok)
-            .transpose()
-            .map(Option::unwrap_or_default)
-    }
-
-    fn join(&mut self, other: PartialReport) {
-        self.inner.extend(other.inner)
-    }
-}
-
-pub struct TestReport {
-    pub solution: PathBuf,
-    pub build: Vec<PartialReport>,
-    pub tests: HashMap<String, Vec<PartialReport>>,
-}
-
-impl TestReport {
-    fn new(solution: PathBuf) -> Self {
-        Self {
-            solution,
-            build: Default::default(),
-            tests: Default::default(),
+    fn timeout(&self) -> Duration {
+        match self {
+            Self::Action { timeout, .. } => *timeout,
+            Self::TransferPatch { timeout, .. } => *timeout,
         }
     }
 }
 
-#[derive(Deserialize, Clone)]
-pub struct Config {
+pub struct Scenario {
     retries: usize,
-    phases: Vec<Vec<(SshCommand, DurationMs)>>,
+    steps: Vec<Vec<Step>>,
 }
+
+pub struct RunConfig {
+    pub execution: ExecutorConfig,
+    pub patch_dst: PathBuf,
+    pub build: Scenario,
+    pub tests: HashMap<String, Scenario>,
+}
+
+#[derive(Default)]
+pub struct ScenarioReport {
+    images: Vec<PathBuf>,
+    attempts: Vec<Vec<ExecutorReport>>,
+}
+
+impl ScenarioReport {
+    fn push_attempt(&mut self, image: PathBuf, attempt: Vec<ExecutorReport>) {
+        self.images.push(image);
+        self.attempts.push(attempt);
+    }
+
+    fn last_image(&self) -> Option<&Path> {
+        self.images.last().map(AsRef::as_ref)
+    }
+
+    fn err(&self) -> Option<&Error> {
+        self.attempts.last()?.last()?.err()
+    }
+}
+
+#[derive(Default)]
+pub struct RunReport {
+    build: ScenarioReport,
+    tests: HashMap<String, ScenarioReport>,
+}
+
+type TestWorker = JoinHandle<Result<(String, ScenarioReport), Error>>;
 
 pub struct Tester {
     pub spawner: QemuSpawner,
@@ -78,147 +97,152 @@ pub struct Tester {
 }
 
 impl Tester {
-    async fn try_run(&self, image: &OsStr, config: &Config) -> crate::Result<PartialReport> {
-        let mut executor = StackExecutor::new(&self.run_config.execution, &self.spawner, image);
+    async fn run_scenario(
+        &self,
+        patch: &Path,
+        base_image: Image<'_>,
+        artifacts: &Path,
+        scenario: &Scenario,
+    ) -> Result<ScenarioReport, Error> {
+        let mut report = ScenarioReport::default();
 
-        for phase in config.phases.iter().cloned() {
-            let mut stack = executor.open_stack().await?;
+        for i in 0..=scenario.retries {
+            let dst = artifacts.join(format!("attempt_{}.img", i + 1));
+            self.builder
+                .create(base_image, Image::Qcow2(dst.as_ref()))
+                .await?;
 
-            for (step, timeout) in phase {
-                let stop = stack.run(step.into(), timeout.into()).await.is_err();
-                if stop {
+            let mut executor =
+                StackExecutor::new(&self.run_config.execution, &self.spawner, dst.as_os_str());
+
+            for phase in &scenario.steps {
+                let iter = phase
+                    .iter()
+                    .map(|step| (step.action(patch), step.timeout()));
+
+                let error = executor.open_stack().await?.consume(iter).await.is_err();
+                if error {
                     break;
                 }
             }
 
-            if stack.finish().await.is_err() {
+            let attempt = executor.finish();
+            report.push_attempt(dst, attempt);
+
+            if report.err().is_none() {
                 break;
             }
         }
 
-        Ok(PartialReport {
-            inner: executor.finish(),
-        })
+        Ok(report)
     }
 
-    async fn try_build(&self, solution: PathBuf, image: &OsStr) -> crate::Result<PartialReport> {
-        let mut res = PartialReport::default();
-
-        let instance = self.spawner.spawn(image.to_owned()).await?;
-        let mut executor = BaseExecutor::new(instance, &self.run_config.execution).await;
-        executor
-            .run(
-                Arc::new(SshCommand::Send {
-                    from: solution,
-                    to: self.run_config.patch_dst.clone(),
-                    mode: 0o777,
-                }),
-                Duration::from_secs(2),
-            )
-            .await
-            .ok();
-        res.push(executor.finish().await);
-
-        if res.ok().is_err() {
-            return Ok(res);
+    async fn prepare_dir(path: &Path) -> io::Result<()> {
+        if let Err(e) = fs::create_dir(path).await {
+            if e.kind() != ErrorKind::AlreadyExists {
+                return Err(e);
+            }
         }
 
-        res.join(self.try_run(image, &self.run_config.build).await?);
-
-        Ok(res)
+        Ok(())
     }
 
-    async fn try_test(&self, test: &str, image: &OsStr) -> crate::Result<PartialReport> {
-        let config = self.run_config.tests.get(test).unwrap();
-        self.try_run(image, config).await
+    async fn build(&self, patch: &Path, artifacts_root: &Path) -> Result<ScenarioReport, Error> {
+        let build_dir = artifacts_root.join("build");
+        Self::prepare_dir(&build_dir).await?;
+
+        self.run_scenario(
+            patch,
+            Image::Raw(&self.base_image),
+            &build_dir,
+            &self.run_config.build,
+        )
+        .await
+    }
+
+    async fn spawn_test_workers(
+        self: Arc<Self>,
+        patch: &Path,
+        artifacts_root: &Path,
+        built_image: Option<&Path>,
+    ) -> Result<Vec<TestWorker>, Error> {
+        let tests_dir = artifacts_root.join("tests");
+        Self::prepare_dir(&tests_dir).await?;
+
+        let handles = self
+            .run_config
+            .tests
+            .keys()
+            .cloned()
+            .map(|test| {
+                let tester = self.clone();
+                let artifacts = tests_dir.join(&test);
+                let image = built_image.map(Path::to_owned);
+                let patch = patch.to_path_buf();
+
+                task::spawn(async move {
+                    Self::prepare_dir(&artifacts).await?;
+
+                    let base_image = image
+                        .as_ref()
+                        .map(AsRef::as_ref)
+                        .map(Image::Qcow2)
+                        .unwrap_or(Image::Raw(&tester.base_image));
+
+                    let report = tester
+                        .run_scenario(
+                            &patch,
+                            base_image,
+                            &artifacts,
+                            tester.run_config.tests.get(&test).unwrap(),
+                        )
+                        .await?;
+
+                    Ok((test, report))
+                })
+            })
+            .collect();
+
+        Ok(handles)
     }
 
     pub async fn process(
         self: Arc<Self>,
-        solution: &Path,
-        artifacts: Arc<PathBuf>,
-    ) -> crate::Result<TestReport> {
-        let mut res = TestReport::new(solution.to_path_buf());
+        patch: &Path,
+        artifacts_root: &Path,
+    ) -> Result<RunReport, Error> {
+        let artifacts_root = artifacts_root.canonicalize()?;
 
-        let patched_img = Arc::new(artifacts.join("patched.img"));
-        let mut success = false;
-        for _ in 0..=self.run_config.build.retries {
-            self.builder
-                .create(Image::Raw(&self.base_image), Image::Qcow2(&patched_img))
-                .await?;
-            let report = self
-                .try_build(solution.to_path_buf(), patched_img.as_os_str())
-                .await?;
-
-            success = report.ok().is_ok();
-            res.build.push(report);
-
-            if success {
-                break;
-            }
+        let mut res = RunReport {
+            build: self.build(patch, &artifacts_root).await?,
+            tests: Default::default(),
+        };
+        if res.build.err().is_some() {
+            return Ok(res);
         }
 
-        if success {
-            let mut handles = Vec::with_capacity(self.run_config.tests.len());
+        let mut handles = self
+            .spawn_test_workers(patch, &artifacts_root, res.build.last_image())
+            .await?;
 
-            for test in self.run_config.tests.keys().cloned() {
-                let tester = self.clone();
-                let artifacts = artifacts.clone();
-                let patched_img = patched_img.clone();
+        while let Some(handle) = handles.pop() {
+            match handle.await {
+                Ok(Ok((test, reports))) => {
+                    res.tests.insert(test, reports);
+                }
+                Ok(Err(error)) => {
+                    handles.iter().for_each(JoinHandle::abort);
 
-                let handle = task::spawn(async move {
-                    let mut reports = Vec::new();
+                    return Err(error);
+                }
+                Err(error) => {
+                    handles.iter().for_each(JoinHandle::abort);
 
-                    let config = tester.run_config.tests.get(&test).unwrap();
-
-                    let mut success;
-                    for i in 0..=config.retries {
-                        let img = artifacts.join(format!("{}_attempt_{}.img", test, i + 1));
-                        let build_res = tester
-                            .builder
-                            .create(Image::Qcow2(&patched_img), Image::Qcow2(&img))
-                            .await;
-                        if let Err(e) = build_res {
-                            return Err(e);
-                        }
-
-                        let res = tester.try_test(&test, img.as_os_str()).await;
-                        match res {
-                            Ok(report) => {
-                                success = report.ok().is_ok();
-                                reports.push(report);
-
-                                if success {
-                                    break;
-                                }
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    }
-
-                    Ok((test, reports))
-                });
-
-                handles.push(handle);
-            }
-
-            while let Some(handle) = handles.pop() {
-                match handle.await {
-                    Ok(Ok((test, reports))) => {
-                        res.tests.insert(test, reports);
-                    }
-                    Ok(Err(error)) => {
-                        handles.iter().for_each(JoinHandle::abort);
-                        return Err(error);
-                    }
-                    Err(error) => {
-                        handles.iter().for_each(JoinHandle::abort);
-                        return Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            format!("failed to run test: {}", error),
-                        )
-                        .into());
-                    }
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("failed to run test: {}", error),
+                    )
+                    .into());
                 }
             }
         }

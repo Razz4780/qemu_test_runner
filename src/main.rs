@@ -1,7 +1,7 @@
 use clap::Parser;
 use qemu_test_runner::{
     qemu::{ImageBuilder, QemuConfig, QemuSpawner},
-    tester::{RunConfig, TestReport, Tester},
+    tester::{RunConfig, RunReport, Tester},
 };
 use std::{
     collections::HashSet,
@@ -49,7 +49,8 @@ struct Args {
 fn make_tester(args: Args) -> Tester {
     let config: RunConfig = {
         let bytes = fs::read(&args.suite).expect("failed to read the suite file");
-        serde_json::from_slice(&bytes[..]).expect("failed to parse the suite file")
+        // serde_json::from_slice(&bytes[..]).expect("failed to parse the suite file")
+        todo!()
     };
 
     Tester {
@@ -68,7 +69,7 @@ fn make_tester(args: Args) -> Tester {
     }
 }
 
-fn output_results(_dst: &Path, _results: &[TestReport]) {
+fn output_results(_dst: &Path, _results: &[RunReport]) {
     todo!()
 }
 
@@ -111,7 +112,7 @@ async fn main() {
     for patch in patches {
         let tester = tester.clone();
         let artifacts = artifacts.join(patch.file_stem().unwrap());
-        let handle = task::spawn(async move { tester.process(&patch, artifacts.into()).await });
+        let handle = task::spawn(async move { tester.process(&patch, artifacts.as_ref()).await });
         handles.push(handle);
     }
 

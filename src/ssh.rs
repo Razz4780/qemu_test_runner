@@ -7,7 +7,6 @@ use std::{
     io::{self, Read},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
-    sync::Arc,
     thread,
     time::Duration,
 };
@@ -18,7 +17,7 @@ use tokio::{
 
 /// A command that can be executed by the [SshHandle].
 #[derive(Debug, Deserialize, Clone)]
-pub enum SshCommand {
+pub enum SshAction {
     /// Executing a command on the remote machine.
     Exec {
         /// Commang to be executed.
@@ -35,7 +34,7 @@ pub enum SshCommand {
     },
 }
 
-struct Work(Arc<SshCommand>, oneshot::Sender<Result<Output>>);
+struct Work(SshAction, oneshot::Sender<Result<Output>>);
 
 /// A worker for executing blocking functions from the [ssh2] crate.
 struct SshWorker {
@@ -62,15 +61,15 @@ impl SshWorker {
     /// Runs this worker until all of the related [SshCommand] [mpsc::Sender]s are dropped.
     /// This is a blocking method.
     fn run(mut self) {
-        while let Some(Work(command, tx)) = self.receiver.blocking_recv() {
-            match &*command {
-                SshCommand::Exec { cmd } => {
-                    let res = self.exec(cmd);
+        while let Some(Work(action, tx)) = self.receiver.blocking_recv() {
+            match action {
+                SshAction::Exec { cmd } => {
+                    let res = self.exec(&cmd);
                     tx.send(res).ok();
                 }
-                SshCommand::Send { from, to, mode } => {
+                SshAction::Send { from, to, mode } => {
                     let res = self
-                        .send(from, to, *mode)
+                        .send(&from, &to, mode)
                         .map(|_| Output::default())
                         .map_err(Into::into);
                     tx.send(res).ok();
@@ -168,8 +167,8 @@ impl SshHandle {
         )
     }
 
-    /// Executes an [SshCommand] on the remote machine.
-    pub async fn exec(&mut self, cmd: Arc<SshCommand>) -> Result<Output> {
+    /// Executes an [SshAction] on the remote machine.
+    pub async fn exec(&mut self, cmd: SshAction) -> Result<Output> {
         let (tx, rx) = oneshot::channel();
 
         self.sender

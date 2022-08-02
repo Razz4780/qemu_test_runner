@@ -1,8 +1,7 @@
-use crate::{ssh::SshCommand, DurationMs, Error, Output};
+use crate::{ssh::SshAction, DurationMs, Error, Output};
 use serde::Deserialize;
 use std::{
     ffi::{OsStr, OsString},
-    sync::Arc,
     time::Duration,
 };
 
@@ -11,7 +10,7 @@ pub mod stack;
 
 /// Config for running a sequence of actions on a [crate::qemu::QemuInstance].
 #[derive(Deserialize)]
-pub struct Config {
+pub struct ExecutorConfig {
     /// The user to executing actions.
     pub user: String,
     /// The password for the user.
@@ -25,16 +24,16 @@ pub struct Config {
 }
 
 #[derive(Debug)]
-pub struct StepReport {
-    pub cmd: Arc<SshCommand>,
+pub struct ActionReport {
+    pub action: SshAction,
     pub timeout: Duration,
     pub elapsed_time: Duration,
     pub output: Result<Output, Error>,
 }
 
-impl StepReport {
-    fn ok(&self) -> Result<(), &Error> {
-        self.output.as_ref().map(|_| ())
+impl ActionReport {
+    fn err(&self) -> Option<&Error> {
+        self.output.as_ref().err()
     }
 }
 
@@ -47,8 +46,8 @@ pub struct ExecutorReport {
     qemu: Result<Output, Error>,
     /// Result of creating the SSH connection.
     connect: Result<(), Error>,
-    /// Reports from the executed steps.
-    steps: Vec<StepReport>,
+    /// Reports from the executed [SshAction]s.
+    action_reports: Vec<ActionReport>,
 }
 
 impl ExecutorReport {
@@ -64,13 +63,15 @@ impl ExecutorReport {
         self.connect.as_ref().err()
     }
 
-    pub fn steps(&self) -> &[StepReport] {
-        &self.steps[..]
+    pub fn action_reports(&self) -> &[ActionReport] {
+        &self.action_reports[..]
     }
 
-    pub fn ok(&self) -> Result<(), &Error> {
-        self.connect.as_ref()?;
-        self.steps.last().map(StepReport::ok).transpose()?;
-        self.qemu.as_ref().map(|_| ())
+    pub fn err(&self) -> Option<&Error> {
+        self.connect
+            .as_ref()
+            .err()
+            .or_else(|| self.action_reports.last().and_then(ActionReport::err))
+            .or_else(|| self.qemu.as_ref().err())
     }
 }

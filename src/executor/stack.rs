@@ -1,9 +1,9 @@
-use super::{base::BaseExecutor, Config, ExecutorReport};
-use crate::{qemu::QemuSpawner, ssh::SshCommand, Error};
-use std::{ffi::OsStr, sync::Arc, time::Duration};
+use super::{base::BaseExecutor, ExecutorConfig, ExecutorReport};
+use crate::{qemu::QemuSpawner, ssh::SshAction, Error};
+use std::{ffi::OsStr, time::Duration};
 
 pub struct StackExecutor<'a> {
-    config: &'a Config,
+    config: &'a ExecutorConfig,
     reports: Vec<ExecutorReport>,
     spawner: &'a QemuSpawner,
     image: &'a OsStr,
@@ -11,7 +11,7 @@ pub struct StackExecutor<'a> {
 
 impl<'a> StackExecutor<'a> {
     pub fn new(
-        config: &'a Config,
+        config: &'a ExecutorConfig,
         spawner: &'a QemuSpawner,
         image: &'a OsStr,
     ) -> StackExecutor<'a> {
@@ -44,17 +44,31 @@ pub struct Stack<'a> {
 }
 
 impl<'a> Stack<'a> {
-    pub async fn run(&mut self, step: Arc<SshCommand>, timeout: Duration) -> Result<(), &Error> {
-        self.inner.run(step, timeout).await
+    pub async fn run(&mut self, action: SshAction, timeout: Duration) -> Result<(), &Error> {
+        self.inner.run(action, timeout).await
     }
 
     pub async fn finish(self) -> Result<(), &'a Error> {
         let report = self.inner.finish().await;
         self.reports.push(report);
+
         self.reports
             .last()
-            .map(ExecutorReport::ok)
-            .transpose()
-            .map(Option::unwrap_or_default)
+            .and_then(ExecutorReport::err)
+            .map(Err)
+            .unwrap_or(Ok(()))
+    }
+
+    pub async fn consume<I>(mut self, iter: I) -> Result<(), &'a Error>
+    where
+        I: Iterator<Item = (SshAction, Duration)>,
+    {
+        for (action, timeout) in iter {
+            if self.run(action, timeout).await.is_err() {
+                break;
+            }
+        }
+
+        self.finish().await
     }
 }
