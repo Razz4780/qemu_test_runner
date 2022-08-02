@@ -58,7 +58,7 @@ impl SshWorker {
         Ok(session)
     }
 
-    /// Runs this worker until all of the related [SshCommand] [mpsc::Sender]s are dropped.
+    /// Runs this worker until all of the related [SshAction] [mpsc::Sender]s are dropped.
     /// This is a blocking method.
     fn run(mut self) {
         while let Some(Work(action, tx)) = self.receiver.blocking_recv() {

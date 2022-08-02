@@ -23,7 +23,7 @@ impl<'a> BaseExecutor<'a> {
     /// Creates a new instance of this struct.
     /// This instance will operate on the given [QemuInstance].
     pub async fn new(qemu: QemuInstance, config: &'a ExecutorConfig) -> BaseExecutor<'a> {
-        let ssh = time::timeout(config.connection_timeout.into(), async {
+        let ssh = time::timeout(config.connection_timeout, async {
             loop {
                 let handle = match qemu.ssh().await {
                     Ok(addr) => {
@@ -93,7 +93,7 @@ impl<'a> BaseExecutor<'a> {
 
                 let start = Instant::now();
                 let res: Result<Result<(), io::Error>, Elapsed> =
-                    time::timeout(self.config.poweroff_timeout.into(), async {
+                    time::timeout(self.config.poweroff_timeout, async {
                         ssh.exec(action.clone()).await.ok();
 
                         while self.qemu.try_wait()?.is_none() {
@@ -119,7 +119,7 @@ impl<'a> BaseExecutor<'a> {
 
                 self.reports.push(ActionReport {
                     action,
-                    timeout: self.config.poweroff_timeout.into(),
+                    timeout: self.config.poweroff_timeout,
                     elapsed_time: elapsed,
                     output,
                 })

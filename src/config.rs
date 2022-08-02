@@ -60,7 +60,7 @@ pub enum StepConfig {
 }
 
 impl StepConfig {
-    fn to_step(self, default_timeout: Duration, default_mode: i32) -> Step {
+    fn into_step(self, default_timeout: Duration, default_mode: i32) -> Step {
         match self {
             Self::FileTransfer {
                 from,
@@ -108,7 +108,7 @@ pub struct ScenarioConfig {
 }
 
 impl ScenarioConfig {
-    fn to_scenario(
+    fn into_scenario(
         self,
         default_retries: usize,
         default_timeout: Duration,
@@ -120,7 +120,7 @@ impl ScenarioConfig {
             .map(|phase_config| {
                 phase_config
                     .into_iter()
-                    .map(|step_config| step_config.to_step(default_timeout, default_mode))
+                    .map(|step_config| step_config.into_step(default_timeout, default_mode))
                     .collect()
             })
             .collect();
@@ -157,7 +157,7 @@ pub struct Config {
 impl From<Config> for RunConfig {
     fn from(config: Config) -> RunConfig {
         let make_scenario = move |scenario_config: ScenarioConfig| {
-            scenario_config.to_scenario(
+            scenario_config.into_scenario(
                 config.retries,
                 Duration::from_millis(config.step_timeout_ms),
                 config.file_mode,

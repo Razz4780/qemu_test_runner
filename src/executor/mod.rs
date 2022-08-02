@@ -35,12 +35,12 @@ impl ActionReport {
     }
 }
 
-/// A report from executing a sequence of actions on a [QemuInstance].
+/// A report from executing a sequence of actions on a [crate::qemu::QemuInstance].
 #[derive(Debug)]
 pub struct ExecutorReport {
-    /// Path to the image used by the [QemuInstance].
+    /// Path to the image used by the [crate::qemu::QemuInstance].
     image: OsString,
-    /// Output of the [QemuInstance].
+    /// Output of the [crate::qemu::QemuInstance].
     qemu: Result<Output, Error>,
     /// Result of creating the SSH connection.
     connect: Result<(), Error>,
