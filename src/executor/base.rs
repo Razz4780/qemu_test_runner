@@ -1,12 +1,11 @@
-use super::{Config, ExecutorReport, StepReport};
+use super::{ActionReport, ExecutorConfig, ExecutorReport};
 use crate::{
     qemu::QemuInstance,
-    ssh::{SshCommand, SshHandle},
+    ssh::{SshAction, SshHandle},
     Error, Output,
 };
 use std::{
     io,
-    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::time::{self, error::Elapsed};
@@ -15,16 +14,16 @@ use tokio::time::{self, error::Elapsed};
 /// Used to interact with the instance over SSH.
 pub struct BaseExecutor<'a> {
     qemu: QemuInstance,
-    config: &'a Config,
+    config: &'a ExecutorConfig,
     ssh: Result<SshHandle, Error>,
-    reports: Vec<StepReport>,
+    reports: Vec<ActionReport>,
 }
 
 impl<'a> BaseExecutor<'a> {
     /// Creates a new instance of this struct.
     /// This instance will operate on the given [QemuInstance].
-    pub async fn new(qemu: QemuInstance, config: &'a Config) -> BaseExecutor<'a> {
-        let ssh = time::timeout(config.connection_timeout.into(), async {
+    pub async fn new(qemu: QemuInstance, config: &'a ExecutorConfig) -> BaseExecutor<'a> {
+        let ssh = time::timeout(config.connection_timeout, async {
             loop {
                 let handle = match qemu.ssh().await {
                     Ok(addr) => {
@@ -52,12 +51,12 @@ impl<'a> BaseExecutor<'a> {
         }
     }
 
-    pub async fn run(&mut self, step: Arc<SshCommand>, timeout: Duration) -> Result<(), &Error> {
+    pub async fn run(&mut self, action: SshAction, timeout: Duration) -> Result<(), &Error> {
         let ssh = self.ssh.as_mut()?;
 
         let start = Instant::now();
 
-        let res = time::timeout(timeout, ssh.exec(step.clone())).await;
+        let res = time::timeout(timeout, ssh.exec(action.clone())).await;
         let elapsed_time = start.elapsed();
         let output = match res {
             Ok(Ok(output)) => Ok(output),
@@ -65,8 +64,8 @@ impl<'a> BaseExecutor<'a> {
             Err(error) => Err(error.into()),
         };
 
-        self.reports.push(StepReport {
-            cmd: step,
+        self.reports.push(ActionReport {
+            action,
             timeout,
             elapsed_time,
             output,
@@ -74,28 +73,28 @@ impl<'a> BaseExecutor<'a> {
 
         self.reports
             .last()
-            .map(StepReport::ok)
-            .transpose()
-            .map(Option::unwrap_or_default)
+            .and_then(ActionReport::err)
+            .map(Err)
+            .unwrap_or(Ok(()))
     }
 
     pub async fn finish(mut self) -> ExecutorReport {
-        let steps_ok = self
+        let actions_ok = self
             .reports
             .last()
             .map(|report| report.output.is_ok())
             .unwrap_or(true);
 
-        match (self.ssh.as_mut(), steps_ok) {
+        match (self.ssh.as_mut(), actions_ok) {
             (Ok(ssh), true) => {
-                let cmd = Arc::new(SshCommand::Exec {
+                let action = SshAction::Exec {
                     cmd: self.config.poweroff_command.clone(),
-                });
+                };
 
                 let start = Instant::now();
                 let res: Result<Result<(), io::Error>, Elapsed> =
-                    time::timeout(self.config.poweroff_timeout.into(), async {
-                        ssh.exec(cmd.clone()).await.ok();
+                    time::timeout(self.config.poweroff_timeout, async {
+                        ssh.exec(action.clone()).await.ok();
 
                         while self.qemu.try_wait()?.is_none() {
                             time::sleep(Duration::from_millis(100)).await;
@@ -118,9 +117,9 @@ impl<'a> BaseExecutor<'a> {
                     }
                 };
 
-                self.reports.push(StepReport {
-                    cmd,
-                    timeout: self.config.poweroff_timeout.into(),
+                self.reports.push(ActionReport {
+                    action,
+                    timeout: self.config.poweroff_timeout,
                     elapsed_time: elapsed,
                     output,
                 })
@@ -137,7 +136,7 @@ impl<'a> BaseExecutor<'a> {
             image,
             qemu,
             connect: self.ssh.map(|_| ()),
-            steps: self.reports,
+            action_reports: self.reports,
         }
     }
 }
