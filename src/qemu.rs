@@ -1,4 +1,4 @@
-use crate::{Output, Result};
+use crate::{Error, Output};
 use std::{
     ffi::{OsStr, OsString},
     io,
@@ -49,7 +49,7 @@ pub struct ImageBuilder {
 
 impl ImageBuilder {
     /// Creates a new image located at `dst` and backed by `src`.
-    pub async fn create(&self, src: Image<'_>, dst: Image<'_>) -> Result<Output> {
+    pub async fn create(&self, src: Image<'_>, dst: Image<'_>) -> Result<Output, Error> {
         Command::new(&self.cmd)
             .arg("create")
             .arg("-f")
@@ -160,7 +160,7 @@ impl QemuInstance {
     }
 
     /// Waits for the wrapped [Child]'s [Output].
-    pub async fn wait(mut self) -> Result<Output> {
+    pub async fn wait(mut self) -> Result<Output, Error> {
         self.child
             .take()
             .unwrap()
@@ -260,7 +260,7 @@ impl QemuSpawner {
     /// Spawns a new QEMU instance.
     /// The instance will use the image under the given `image_path`.
     /// This method will wait if there are too many running QEMU processes spawned with this instance.
-    pub async fn spawn(&self, image_path: OsString) -> Result<QemuInstance> {
+    pub async fn spawn(&self, image_path: OsString) -> Result<QemuInstance, Error> {
         let permit = self
             .permits
             .clone()

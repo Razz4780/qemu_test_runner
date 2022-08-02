@@ -1,4 +1,4 @@
-use crate::{Error, Output, Result};
+use crate::{Error, Output};
 use serde::Deserialize;
 use ssh2::Session;
 use std::{
@@ -34,7 +34,7 @@ pub enum SshAction {
     },
 }
 
-struct Work(SshAction, oneshot::Sender<Result<Output>>);
+struct Work(SshAction, oneshot::Sender<Result<Output, Error>>);
 
 /// A worker for executing blocking functions from the [ssh2] crate.
 struct SshWorker {
@@ -80,7 +80,7 @@ impl SshWorker {
 
     /// Executes a command on the remote machine.
     /// This is a blocking method.
-    fn exec(&mut self, cmd: &str) -> Result<Output> {
+    fn exec(&mut self, cmd: &str) -> Result<Output, Error> {
         let mut channel = self.session.channel_session()?;
         channel.exec(cmd).map_err(io::Error::from)?;
 
@@ -168,7 +168,7 @@ impl SshHandle {
     }
 
     /// Executes an [SshAction] on the remote machine.
-    pub async fn exec(&mut self, cmd: SshAction) -> Result<Output> {
+    pub async fn exec(&mut self, cmd: SshAction) -> Result<Output, Error> {
         let (tx, rx) = oneshot::channel();
 
         self.sender

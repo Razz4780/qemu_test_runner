@@ -6,6 +6,7 @@ use std::{
 };
 use tokio::time::error::Elapsed;
 
+pub mod config;
 pub mod executor;
 pub mod qemu;
 pub mod ssh;
@@ -70,8 +71,6 @@ impl<'a> From<&'a mut Error> for &'a Error {
     }
 }
 
-pub type Result<T> = core::result::Result<T, Error>;
-
 /// An output of a successful command.
 #[derive(Default)]
 pub struct Output {
@@ -91,7 +90,7 @@ impl Debug for Output {
 impl TryFrom<process::Output> for Output {
     type Error = Error;
 
-    fn try_from(output: process::Output) -> Result<Self> {
+    fn try_from(output: process::Output) -> Result<Self, Self::Error> {
         if output.status.success() {
             Ok(Self {
                 stdout: output.stdout,

@@ -1,5 +1,6 @@
 use clap::Parser;
 use qemu_test_runner::{
+    config::Config,
     qemu::{ImageBuilder, QemuConfig, QemuSpawner},
     tester::{RunConfig, RunReport, Tester},
 };
@@ -10,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tempfile::TempDir;
 use tokio::task;
 
 #[derive(Parser, Debug)]
@@ -41,31 +43,31 @@ struct Args {
     #[clap(long, value_parser)]
     /// Output directory for artifacts (qcow2 images).
     artifacts: Option<PathBuf>,
-    #[clap(long, value_parser, default_value = ".")]
-    /// Output directory for results.
-    results: PathBuf,
+    #[clap(long, value_parser)]
+    /// Output directory for detailed run reports.
+    reports: Option<PathBuf>,
 }
 
 fn make_tester(args: Args) -> Tester {
-    let config: RunConfig = {
+    let run_config: RunConfig = {
         let bytes = fs::read(&args.suite).expect("failed to read the suite file");
-        // serde_json::from_slice(&bytes[..]).expect("failed to parse the suite file")
-        todo!()
+        let config: Config =
+            serde_json::from_slice(&bytes[..]).expect("failed to parse the suite file");
+        config.try_into().expect("invalid suite configuration")
+    };
+
+    let qemu_config = QemuConfig {
+        cmd: args.qemu_system,
+        memory: args.qemu_memory,
+        enable_kvm: args.qemu_enable_kvm,
+        irqchip_off: args.qemu_irqchip_off,
     };
 
     Tester {
-        spawner: QemuSpawner::new(
-            args.concurrency,
-            QemuConfig {
-                cmd: args.qemu_system,
-                memory: args.qemu_memory,
-                enable_kvm: args.qemu_enable_kvm,
-                irqchip_off: args.qemu_irqchip_off,
-            },
-        ),
+        spawner: QemuSpawner::new(args.concurrency, qemu_config),
         builder: ImageBuilder { cmd: args.qemu_img },
         base_image: args.minix_base,
-        run_config: config,
+        run_config,
     }
 }
 
@@ -91,18 +93,43 @@ fn read_patches() -> Vec<PathBuf> {
         .collect::<Vec<_>>()
 }
 
+enum MaybeTmp {
+    Tmp(TempDir),
+    NotTmp(PathBuf),
+}
+
+impl MaybeTmp {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Tmp(tmp) => tmp.path(),
+            Self::NotTmp(path) => path.as_path(),
+        }
+    }
+}
+
+impl Default for MaybeTmp {
+    fn default() -> Self {
+        let dir = tempfile::tempdir().expect("failed to create a temporary directory");
+        Self::Tmp(dir)
+    }
+}
+
+impl From<PathBuf> for MaybeTmp {
+    fn from(path: PathBuf) -> Self {
+        Self::NotTmp(path)
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
 
-    let (_tmp, artifacts) = if let Some(path) = args.artifacts.clone() {
-        (None, path)
-    } else {
-        let tmp = tempfile::tempdir().expect("failed to create a temporary directory");
-        let path = tmp.path().to_path_buf();
-        (Some(tmp), path)
-    };
-    let results_dst = args.results.clone();
+    let artifacts = args
+        .artifacts
+        .clone()
+        .map(MaybeTmp::from)
+        .unwrap_or_default();
+    let reports = args.reports.clone().map(MaybeTmp::from).unwrap_or_default();
 
     let tester = Arc::new(make_tester(args));
 
@@ -111,7 +138,7 @@ async fn main() {
     let mut handles = Vec::with_capacity(patches.len());
     for patch in patches {
         let tester = tester.clone();
-        let artifacts = artifacts.join(patch.file_stem().unwrap());
+        let artifacts = artifacts.path().join(patch.file_stem().unwrap());
         let handle = task::spawn(async move { tester.process(&patch, artifacts.as_ref()).await });
         handles.push(handle);
     }
@@ -125,5 +152,5 @@ async fn main() {
         }
     }
 
-    output_results(&results_dst, &results[..]);
+    output_results(reports.path(), &results[..]);
 }
