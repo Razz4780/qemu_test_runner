@@ -16,6 +16,7 @@ use tokio::{
     task::{self, JoinHandle},
 };
 
+#[derive(Debug)]
 pub enum Step {
     Action {
         action: SshAction,
@@ -48,14 +49,14 @@ impl Step {
     }
 }
 
+#[derive(Default)]
 pub struct Scenario {
-    retries: usize,
-    steps: Vec<Vec<Step>>,
+    pub retries: usize,
+    pub steps: Vec<Vec<Step>>,
 }
 
 pub struct RunConfig {
     pub execution: ExecutorConfig,
-    pub patch_dst: PathBuf,
     pub build: Scenario,
     pub tests: HashMap<String, Scenario>,
 }

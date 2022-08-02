@@ -1,5 +1,4 @@
-use crate::{ssh::SshAction, DurationMs, Error, Output};
-use serde::Deserialize;
+use crate::{ssh::SshAction, Error, Output};
 use std::{
     ffi::{OsStr, OsString},
     time::Duration,
@@ -9,16 +8,15 @@ pub mod base;
 pub mod stack;
 
 /// Config for running a sequence of actions on a [crate::qemu::QemuInstance].
-#[derive(Deserialize)]
 pub struct ExecutorConfig {
     /// The user to executing actions.
     pub user: String,
     /// The password for the user.
     pub password: String,
     /// Timeout for opening an SSH connection with the [crate::qemu::QemuInstance] (milliseconds).
-    pub connection_timeout: DurationMs,
+    pub connection_timeout: Duration,
     /// Timeout for [crate::qemu::QemuInstance] shutdown (milliseconds).
-    pub poweroff_timeout: DurationMs,
+    pub poweroff_timeout: Duration,
     /// The command that will be used to shutdown the [crate::qemu::QemuInstance].
     pub poweroff_command: String,
 }

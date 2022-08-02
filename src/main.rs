@@ -52,7 +52,7 @@ fn make_tester(args: Args) -> Tester {
     let run_config: RunConfig = {
         let bytes = fs::read(&args.suite).expect("failed to read the suite file");
         let config: Config =
-            serde_json::from_slice(&bytes[..]).expect("failed to parse the suite file");
+            serde_yaml::from_slice(&bytes[..]).expect("failed to parse the suite file");
         config.try_into().expect("invalid suite configuration")
     };
 
