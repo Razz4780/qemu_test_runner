@@ -2,7 +2,8 @@ use clap::Parser;
 use qemu_test_runner::{
     config::Config,
     qemu::{ImageBuilder, QemuConfig, QemuSpawner},
-    tester::{RunConfig, RunReport, Tester},
+    tester::{PatchProcessor, RunConfig, RunReport, Tester},
+    Error,
 };
 use std::{
     collections::HashSet,
@@ -12,7 +13,11 @@ use std::{
     sync::Arc,
 };
 use tempfile::TempDir;
-use tokio::task;
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    task,
+};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -48,7 +53,7 @@ struct Args {
     reports: Option<PathBuf>,
 }
 
-fn make_tester(args: Args) -> Tester {
+fn make_patch_processor(args: Args) -> PatchProcessor {
     let run_config: RunConfig = {
         let bytes = fs::read(&args.suite).expect("failed to read the suite file");
         let config: Config =
@@ -63,34 +68,12 @@ fn make_tester(args: Args) -> Tester {
         irqchip_off: args.qemu_irqchip_off,
     };
 
-    Tester {
+    PatchProcessor {
         spawner: QemuSpawner::new(args.concurrency, qemu_config),
         builder: ImageBuilder { cmd: args.qemu_img },
         base_image: args.minix_base,
         run_config,
     }
-}
-
-fn output_results(_dst: &Path, _results: &[RunReport]) {
-    todo!()
-}
-
-fn read_patches() -> Vec<PathBuf> {
-    let mut stems = HashSet::new();
-    io::stdin()
-        .lines()
-        .map(|l| {
-            let path: &Path = l.as_ref().expect("failed to read from stdin").as_ref();
-            path.canonicalize().expect("failed to canonicalize path")
-        })
-        .filter(|patch| {
-            if let Some(stem) = patch.file_stem() {
-                stems.insert(stem.to_os_string())
-            } else {
-                false
-            }
-        })
-        .collect::<Vec<_>>()
 }
 
 enum MaybeTmp {
@@ -120,6 +103,70 @@ impl From<PathBuf> for MaybeTmp {
     }
 }
 
+struct TesterTask {
+    tester: Tester,
+    patch_source: UnboundedReceiver<PathBuf>,
+}
+
+impl TesterTask {
+    async fn run(mut self) {
+        while let Some(patch) = self.patch_source.recv().await {
+            if let Err(e) = self.tester.clone().schedule(patch).await {
+                eprintln!("an error occurred: {}", e);
+            }
+        }
+    }
+}
+
+struct InputTask {
+    patch_sink: UnboundedSender<PathBuf>,
+    seen_patches: HashSet<OsString>,
+}
+
+impl InputTask {
+    fn new(patch_sink: UnboundedSender<PathBuf>) -> Self {
+        Self {
+            patch_sink,
+            seen_patches: Default::default(),
+        }
+    }
+    async fn run(mut self) -> io::Result<()> {
+        let stdin = tokio::io::stdin();
+        let mut reader = BufReader::new(stdin);
+        let mut buf = String::new();
+
+        while reader.read_line(&mut buf).await? > 0 {
+            let patch = PathBuf::from(&buf);
+            buf.clear();
+
+            let stem = match patch.file_stem() {
+                Some(stem) if self.seen_patches.contains(stem) => {
+                    eprintln!("patch {} already seen", stem.to_string_lossy());
+                    continue;
+                }
+                Some(stem) => stem.to_os_string(),
+                None => {
+                    eprintln!("path {} does not have a stem", patch.display());
+                    continue;
+                }
+            };
+
+            self.seen_patches.insert(stem);
+
+            if self.patch_sink.send(patch).is_err() {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+async fn output_results(patch: &Path, _results: &Result<RunReport, Error>) -> io::Result<()> {
+    eprintln!("patch {} processed", patch.display());
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -129,28 +176,36 @@ async fn main() {
         .clone()
         .map(MaybeTmp::from)
         .unwrap_or_default();
-    let reports = args.reports.clone().map(MaybeTmp::from).unwrap_or_default();
 
-    let tester = Arc::new(make_tester(args));
+    let (report_tx, mut report_rx) = mpsc::unbounded_channel();
+    let (patch_tx, patch_rx) = mpsc::unbounded_channel();
 
-    let patches = read_patches();
+    let tester_task = TesterTask {
+        tester: Tester {
+            processor: Arc::new(make_patch_processor(args)),
+            artifacts_root: artifacts.path().to_path_buf(),
+            reports_sink: report_tx,
+        },
+        patch_source: patch_rx,
+    };
+    let tester_task = task::spawn(tester_task.run());
 
-    let mut handles = Vec::with_capacity(patches.len());
-    for patch in patches {
-        let tester = tester.clone();
-        let artifacts = artifacts.path().join(patch.file_stem().unwrap());
-        let handle = task::spawn(async move { tester.process(&patch, artifacts.as_ref()).await });
-        handles.push(handle);
-    }
+    let input_task = InputTask::new(patch_tx);
+    let input_task = task::spawn(input_task.run());
 
-    let mut results = Vec::with_capacity(handles.len());
-    for handle in handles {
-        match handle.await {
-            Ok(Ok(report)) => results.push(report),
-            Ok(Err(_)) => {}
-            Err(_) => {}
+    while let Some((patch, report)) = report_rx.recv().await {
+        if let Err(e) = output_results(&patch, &report).await {
+            eprintln!(
+                "failed to output results for patch {}: {}",
+                patch.display(),
+                e
+            )
         }
     }
 
-    output_results(reports.path(), &results[..]);
+    tester_task.await.expect("an internal task panicked");
+    input_task
+        .await
+        .expect("an internal task panicked")
+        .expect("an IO error occurred");
 }
