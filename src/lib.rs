@@ -1,11 +1,12 @@
 use std::{
-    fmt::{self, Debug, Formatter},
+    fmt::{self, Debug, Display, Formatter},
     io, process,
 };
 use tokio::time::error::Elapsed;
 
 pub mod config;
 pub mod executor;
+pub mod printer;
 pub mod qemu;
 pub mod ssh;
 pub mod tester;
@@ -16,6 +17,15 @@ pub struct Error {
     pub error: Option<io::Error>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match &self.error {
+            Some(error) => write!(f, "{}", error),
+            None => f.write_str("process was killed by a signal"),
+        }
+    }
 }
 
 impl Debug for Error {
