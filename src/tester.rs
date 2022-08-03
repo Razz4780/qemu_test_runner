@@ -78,15 +78,31 @@ impl ScenarioReport {
         self.images.last().map(AsRef::as_ref)
     }
 
-    fn err(&self) -> Option<&Error> {
+    pub fn err(&self) -> Option<&Error> {
         self.attempts.last()?.last()?.err()
+    }
+
+    pub fn runs(&self) -> impl Iterator<Item = (&[ExecutorReport], &Path)> {
+        self.attempts
+            .iter()
+            .map(Vec::as_slice)
+            .zip(self.images.iter().map(PathBuf::as_path))
     }
 }
 
-#[derive(Default)]
 pub struct RunReport {
     build: ScenarioReport,
     tests: HashMap<String, ScenarioReport>,
+}
+
+impl RunReport {
+    pub fn build(&self) -> &ScenarioReport {
+        &self.build
+    }
+
+    pub fn tests(&self) -> &HashMap<String, ScenarioReport> {
+        &self.tests
+    }
 }
 
 async fn prepare_dir(path: &Path) -> io::Result<()> {

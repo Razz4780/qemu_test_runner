@@ -36,7 +36,20 @@ where
             .file_stem()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "file has no stem"))?;
         let tests = match run_report {
-            Ok(_) => todo!(),
+            Ok(run_report) if run_report.build().err().is_some() => "build failed".into(),
+            Ok(run_report) => {
+                let failed_tests = run_report
+                    .tests()
+                    .iter()
+                    .filter_map(|(name, report)| report.err().is_none().then_some(&name[..]))
+                    .collect::<Vec<_>>();
+
+                if failed_tests.is_empty() {
+                    "OK".into()
+                } else {
+                    format!("tests failed: {}", failed_tests.join(","))
+                }
+            }
             Err(error) => format!("testing failed with error: {}", error),
         };
 
