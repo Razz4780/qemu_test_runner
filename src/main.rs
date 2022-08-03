@@ -1,6 +1,7 @@
 use clap::Parser;
 use qemu_test_runner::{
     config::Config,
+    printer::Printer,
     qemu::{ImageBuilder, QemuConfig, QemuSpawner},
     tester::{PatchProcessor, RunConfig, RunReport, Tester},
     Error,
@@ -8,13 +9,14 @@ use qemu_test_runner::{
 use std::{
     collections::HashSet,
     ffi::OsString,
-    fs, io,
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tempfile::TempDir;
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    fs,
+    io::{AsyncBufReadExt, AsyncWrite, BufReader},
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task,
 };
@@ -53,9 +55,11 @@ struct Args {
     reports: Option<PathBuf>,
 }
 
-fn make_patch_processor(args: Args) -> PatchProcessor {
+async fn make_patch_processor(args: Args) -> PatchProcessor {
     let run_config: RunConfig = {
-        let bytes = fs::read(&args.suite).expect("failed to read the suite file");
+        let bytes = fs::read(&args.suite)
+            .await
+            .expect("failed to read the suite file");
         let config: Config =
             serde_yaml::from_slice(&bytes[..]).expect("failed to parse the suite file");
         config.try_into().expect("invalid suite configuration")
@@ -82,6 +86,16 @@ enum MaybeTmp {
 }
 
 impl MaybeTmp {
+    async fn at_path(path: PathBuf) -> Self {
+        if let Err(e) = fs::create_dir_all(&path).await {
+            if e.kind() != ErrorKind::AlreadyExists {
+                panic!("failed to access directory {}: {}", path.display(), e);
+            }
+        }
+
+        Self::NotTmp(path)
+    }
+
     fn path(&self) -> &Path {
         match self {
             Self::Tmp(tmp) => tmp.path(),
@@ -94,12 +108,6 @@ impl Default for MaybeTmp {
     fn default() -> Self {
         let dir = tempfile::tempdir().expect("failed to create a temporary directory");
         Self::Tmp(dir)
-    }
-}
-
-impl From<PathBuf> for MaybeTmp {
-    fn from(path: PathBuf) -> Self {
-        Self::NotTmp(path)
     }
 }
 
@@ -162,46 +170,55 @@ impl InputTask {
     }
 }
 
-async fn output_results(patch: &Path, _results: &Result<RunReport, Error>) -> io::Result<()> {
-    eprintln!("patch {} processed", patch.display());
-    Ok(())
+async fn output_results<W>(
+    mut printer: Printer<W>,
+    mut results_rx: UnboundedReceiver<(PathBuf, Result<RunReport, Error>)>,
+) where
+    W: AsyncWrite,
+{
+    while let Some((patch, result)) = results_rx.recv().await {
+        let err = printer.print(&patch, result.as_ref()).await.err();
+        if let Some(err) = err {
+            eprintln!(
+                "failed to output results for patch {}: {}",
+                patch.display(),
+                err
+            );
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
 
-    let artifacts = args
-        .artifacts
-        .clone()
-        .map(MaybeTmp::from)
-        .unwrap_or_default();
+    let artifacts = match args.artifacts.clone() {
+        Some(path) => MaybeTmp::at_path(path).await,
+        None => MaybeTmp::default(),
+    };
+    let reports = match args.reports.clone() {
+        Some(path) => MaybeTmp::at_path(path).await,
+        None => MaybeTmp::default(),
+    };
 
-    let (report_tx, mut report_rx) = mpsc::unbounded_channel();
+    let (report_tx, report_rx) = mpsc::unbounded_channel();
     let (patch_tx, patch_rx) = mpsc::unbounded_channel();
 
-    let tester_task = TesterTask {
-        tester: Tester {
-            processor: Arc::new(make_patch_processor(args)),
-            artifacts_root: artifacts.path().to_path_buf(),
-            reports_sink: report_tx,
-        },
-        patch_source: patch_rx,
+    let tester_task = {
+        let task = TesterTask {
+            tester: Tester {
+                processor: Arc::new(make_patch_processor(args).await),
+                artifacts_root: artifacts.path().to_path_buf(),
+                reports_sink: report_tx,
+            },
+            patch_source: patch_rx,
+        };
+        task::spawn(task.run())
     };
-    let tester_task = task::spawn(tester_task.run());
+    let input_task = task::spawn(InputTask::new(patch_tx).run());
 
-    let input_task = InputTask::new(patch_tx);
-    let input_task = task::spawn(input_task.run());
-
-    while let Some((patch, report)) = report_rx.recv().await {
-        if let Err(e) = output_results(&patch, &report).await {
-            eprintln!(
-                "failed to output results for patch {}: {}",
-                patch.display(),
-                e
-            )
-        }
-    }
+    let printer = Printer::new(reports.path().to_path_buf(), tokio::io::stdout());
+    output_results(printer, report_rx).await;
 
     tester_task.await.expect("an internal task panicked");
     input_task
