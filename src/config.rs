@@ -36,9 +36,6 @@ mod defaults {
     }
 }
 
-#[derive(Debug)]
-pub enum ConfigError {}
-
 #[derive(Deserialize, PartialEq, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StepConfig {
