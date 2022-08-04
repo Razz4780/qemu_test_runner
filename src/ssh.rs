@@ -46,6 +46,8 @@ struct SshWorker {
 }
 
 impl SshWorker {
+    const OUTPUT_SIZE_LIMIT: u64 = 1024 * 8;
+
     /// Opens a new [Session] with the given parameters.
     /// This is a blocking method.
     fn open_session(addr: SocketAddr, username: &str, password: &str) -> io::Result<Session> {
@@ -86,21 +88,29 @@ impl SshWorker {
         channel.exec(cmd).map_err(io::Error::from)?;
 
         let mut stdout = Vec::new();
-        channel.read_to_end(&mut stdout)?;
+        (&mut channel)
+            .take(Self::OUTPUT_SIZE_LIMIT)
+            .read_to_end(&mut stdout)?;
 
         let mut stderr = Vec::new();
-        channel.stderr().read_to_end(&mut stderr)?;
+        channel
+            .stderr()
+            .take(Self::OUTPUT_SIZE_LIMIT)
+            .read_to_end(&mut stderr)?;
 
         channel.wait_close()?;
         let exit_status = channel.exit_status()?;
 
         if exit_status == 0 {
-            Ok(Output { stdout, stderr })
+            Ok(Output {
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            })
         } else {
             Err(Error {
                 error: io::Error::from_raw_os_error(exit_status).into(),
-                stdout,
-                stderr,
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
             })
         }
     }

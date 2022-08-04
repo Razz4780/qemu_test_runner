@@ -12,11 +12,12 @@ pub mod ssh;
 pub mod tester;
 
 /// An error that can occurr when executing a command.
+#[derive(Debug)]
 pub struct Error {
     /// An empty error probably means that the child process was killed by a signal.
     pub error: Option<io::Error>,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 impl Display for Error {
@@ -25,16 +26,6 @@ impl Display for Error {
             Some(error) => write!(f, "{}", error),
             None => f.write_str("process was killed by a signal"),
         }
-    }
-}
-
-impl Debug for Error {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Error")
-            .field("error", &self.error)
-            .field("stdout", &String::from_utf8_lossy(&self.stdout[..]))
-            .field("stderr", &String::from_utf8_lossy(&self.stderr[..]))
-            .finish()
     }
 }
 
@@ -75,32 +66,19 @@ impl Serialize for Error {
     where
         S: Serializer,
     {
-        let error = format!("{}", self);
-        let stdout = String::from_utf8_lossy(&self.stdout[..]);
-        let stderr = String::from_utf8_lossy(&self.stderr[..]);
-
         let mut s = serializer.serialize_struct("Error", 3)?;
-        s.serialize_field("error", &error)?;
-        s.serialize_field("stdout", &stdout)?;
-        s.serialize_field("stderr", &stderr)?;
+        s.serialize_field("error", &format!("{}", self))?;
+        s.serialize_field("stdout", &self.stdout)?;
+        s.serialize_field("stderr", &self.stderr)?;
         s.end()
     }
 }
 
 /// An output of a successful command.
-#[derive(Default)]
+#[derive(Default, Debug, Serialize)]
 pub struct Output {
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-}
-
-impl Debug for Output {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Output")
-            .field("stdout", &String::from_utf8_lossy(&self.stdout[..]))
-            .field("stderr", &String::from_utf8_lossy(&self.stderr[..]))
-            .finish()
-    }
+    pub stdout: String,
+    pub stderr: String,
 }
 
 impl TryFrom<process::Output> for Output {
@@ -109,31 +87,16 @@ impl TryFrom<process::Output> for Output {
     fn try_from(output: process::Output) -> Result<Self, Self::Error> {
         if output.status.success() {
             Ok(Self {
-                stdout: output.stdout,
-                stderr: output.stderr,
+                stdout: String::from_utf8_lossy(&output.stdout[..]).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr[..]).into_owned(),
             })
         } else {
             let error = output.status.code().map(io::Error::from_raw_os_error);
             Err(Error {
                 error,
-                stdout: output.stdout,
-                stderr: output.stderr,
+                stdout: String::from_utf8_lossy(&output.stdout[..]).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr[..]).into_owned(),
             })
         }
-    }
-}
-
-impl Serialize for Output {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let stdout = String::from_utf8_lossy(&self.stdout[..]);
-        let stderr = String::from_utf8_lossy(&self.stderr[..]);
-
-        let mut s = serializer.serialize_struct("Output", 3)?;
-        s.serialize_field("stdout", &stdout)?;
-        s.serialize_field("stderr", &stderr)?;
-        s.end()
     }
 }
