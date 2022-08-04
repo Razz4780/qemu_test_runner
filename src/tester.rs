@@ -4,6 +4,7 @@ use crate::{
     ssh::SshAction,
     Error,
 };
+use serde::Serialize;
 use std::{
     collections::HashMap,
     io::{self, ErrorKind},
@@ -13,6 +14,7 @@ use std::{
 };
 use tokio::{
     fs,
+    sync::mpsc::UnboundedSender,
     task::{self, JoinHandle},
 };
 
@@ -61,7 +63,7 @@ pub struct RunConfig {
     pub tests: HashMap<String, Scenario>,
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize)]
 pub struct ScenarioReport {
     images: Vec<PathBuf>,
     attempts: Vec<Vec<ExecutorReport>>,
@@ -77,27 +79,54 @@ impl ScenarioReport {
         self.images.last().map(AsRef::as_ref)
     }
 
-    fn err(&self) -> Option<&Error> {
+    pub fn err(&self) -> Option<&Error> {
         self.attempts.last()?.last()?.err()
+    }
+
+    pub fn runs(&self) -> impl Iterator<Item = (&[ExecutorReport], &Path)> {
+        self.attempts
+            .iter()
+            .map(Vec::as_slice)
+            .zip(self.images.iter().map(PathBuf::as_path))
     }
 }
 
-#[derive(Default)]
+#[derive(Serialize)]
 pub struct RunReport {
     build: ScenarioReport,
     tests: HashMap<String, ScenarioReport>,
 }
 
+impl RunReport {
+    pub fn build(&self) -> &ScenarioReport {
+        &self.build
+    }
+
+    pub fn tests(&self) -> &HashMap<String, ScenarioReport> {
+        &self.tests
+    }
+}
+
+async fn prepare_dir(path: &Path) -> io::Result<()> {
+    if let Err(e) = fs::create_dir(path).await {
+        if e.kind() != ErrorKind::AlreadyExists {
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
 type TestWorker = JoinHandle<Result<(String, ScenarioReport), Error>>;
 
-pub struct Tester {
+pub struct PatchProcessor {
     pub spawner: QemuSpawner,
     pub builder: ImageBuilder,
     pub base_image: PathBuf,
     pub run_config: RunConfig,
 }
 
-impl Tester {
+impl PatchProcessor {
     async fn run_scenario(
         &self,
         patch: &Path,
@@ -138,19 +167,9 @@ impl Tester {
         Ok(report)
     }
 
-    async fn prepare_dir(path: &Path) -> io::Result<()> {
-        if let Err(e) = fs::create_dir(path).await {
-            if e.kind() != ErrorKind::AlreadyExists {
-                return Err(e);
-            }
-        }
-
-        Ok(())
-    }
-
     async fn build(&self, patch: &Path, artifacts_root: &Path) -> Result<ScenarioReport, Error> {
         let build_dir = artifacts_root.join("build");
-        Self::prepare_dir(&build_dir).await?;
+        prepare_dir(&build_dir).await?;
 
         self.run_scenario(
             patch,
@@ -168,7 +187,7 @@ impl Tester {
         built_image: Option<&Path>,
     ) -> Result<Vec<TestWorker>, Error> {
         let tests_dir = artifacts_root.join("tests");
-        Self::prepare_dir(&tests_dir).await?;
+        prepare_dir(&tests_dir).await?;
 
         let handles = self
             .run_config
@@ -182,7 +201,7 @@ impl Tester {
                 let patch = patch.to_path_buf();
 
                 task::spawn(async move {
-                    Self::prepare_dir(&artifacts).await?;
+                    prepare_dir(&artifacts).await?;
 
                     let base_image = image
                         .as_ref()
@@ -249,5 +268,29 @@ impl Tester {
         }
 
         Ok(res)
+    }
+}
+
+#[derive(Clone)]
+pub struct Tester {
+    pub processor: Arc<PatchProcessor>,
+    pub artifacts_root: PathBuf,
+    pub reports_sink: UnboundedSender<(PathBuf, Result<RunReport, Error>)>,
+}
+
+impl Tester {
+    pub async fn schedule(self, patch: PathBuf) -> io::Result<()> {
+        let stem = patch
+            .file_stem()
+            .ok_or_else(|| io::Error::new(ErrorKind::Other, "path has no stem"))?;
+        let artifacts = self.artifacts_root.join(stem);
+        prepare_dir(&artifacts).await?;
+
+        task::spawn(async move {
+            let res = self.processor.process(&patch, &artifacts).await;
+            self.reports_sink.send((patch, res))
+        });
+
+        Ok(())
     }
 }

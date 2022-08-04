@@ -1,5 +1,6 @@
+use serde::{ser::SerializeStruct, Serialize, Serializer};
 use std::{
-    fmt::{self, Debug, Formatter},
+    fmt::{self, Debug, Display, Formatter},
     io, process,
 };
 use tokio::time::error::Elapsed;
@@ -16,6 +17,15 @@ pub struct Error {
     pub error: Option<io::Error>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match &self.error {
+            Some(error) => write!(f, "{}", error),
+            None => f.write_str("process was killed by a signal"),
+        }
+    }
 }
 
 impl Debug for Error {
@@ -60,6 +70,23 @@ impl<'a> From<&'a mut Error> for &'a Error {
     }
 }
 
+impl Serialize for Error {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let error = format!("{}", self);
+        let stdout = String::from_utf8_lossy(&self.stdout[..]);
+        let stderr = String::from_utf8_lossy(&self.stderr[..]);
+
+        let mut s = serializer.serialize_struct("Error", 3)?;
+        s.serialize_field("error", &error)?;
+        s.serialize_field("stdout", &stdout)?;
+        s.serialize_field("stderr", &stderr)?;
+        s.end()
+    }
+}
+
 /// An output of a successful command.
 #[derive(Default)]
 pub struct Output {
@@ -93,5 +120,20 @@ impl TryFrom<process::Output> for Output {
                 stderr: output.stderr,
             })
         }
+    }
+}
+
+impl Serialize for Output {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let stdout = String::from_utf8_lossy(&self.stdout[..]);
+        let stderr = String::from_utf8_lossy(&self.stderr[..]);
+
+        let mut s = serializer.serialize_struct("Output", 3)?;
+        s.serialize_field("stdout", &stdout)?;
+        s.serialize_field("stderr", &stderr)?;
+        s.end()
     }
 }

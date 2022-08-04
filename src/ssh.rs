@@ -1,5 +1,6 @@
 use crate::{Error, Output};
 use serde::Deserialize;
+use serde::Serialize;
 use ssh2::Session;
 use std::{
     fmt::Display,
@@ -16,7 +17,7 @@ use tokio::{
 };
 
 /// A command that can be executed by the [SshHandle].
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Serialize)]
 pub enum SshAction {
     /// Executing a command on the remote machine.
     Exec {
