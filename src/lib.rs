@@ -1,3 +1,4 @@
+use serde::{ser::SerializeStruct, Serialize, Serializer};
 use std::{
     fmt::{self, Debug, Display, Formatter},
     io, process,
@@ -6,7 +7,6 @@ use tokio::time::error::Elapsed;
 
 pub mod config;
 pub mod executor;
-pub mod printer;
 pub mod qemu;
 pub mod ssh;
 pub mod tester;
@@ -70,6 +70,23 @@ impl<'a> From<&'a mut Error> for &'a Error {
     }
 }
 
+impl Serialize for Error {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let error = format!("{}", self);
+        let stdout = String::from_utf8_lossy(&self.stdout[..]);
+        let stderr = String::from_utf8_lossy(&self.stderr[..]);
+
+        let mut s = serializer.serialize_struct("Error", 3)?;
+        s.serialize_field("error", &error)?;
+        s.serialize_field("stdout", &stdout)?;
+        s.serialize_field("stderr", &stderr)?;
+        s.end()
+    }
+}
+
 /// An output of a successful command.
 #[derive(Default)]
 pub struct Output {
@@ -103,5 +120,20 @@ impl TryFrom<process::Output> for Output {
                 stderr: output.stderr,
             })
         }
+    }
+}
+
+impl Serialize for Output {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let stdout = String::from_utf8_lossy(&self.stdout[..]);
+        let stderr = String::from_utf8_lossy(&self.stderr[..]);
+
+        let mut s = serializer.serialize_struct("Output", 3)?;
+        s.serialize_field("stdout", &stdout)?;
+        s.serialize_field("stderr", &stderr)?;
+        s.end()
     }
 }

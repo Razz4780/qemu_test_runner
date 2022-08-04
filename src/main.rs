@@ -1,7 +1,6 @@
 use clap::Parser;
 use qemu_test_runner::{
     config::Config,
-    printer::Printer,
     qemu::{ImageBuilder, QemuConfig, QemuSpawner},
     tester::{PatchProcessor, RunConfig, RunReport, Tester},
     Error,
@@ -16,7 +15,7 @@ use std::{
 use tempfile::TempDir;
 use tokio::{
     fs,
-    io::{AsyncBufReadExt, AsyncWrite, BufReader},
+    io::{AsyncBufReadExt, BufReader},
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task,
 };
@@ -170,22 +169,39 @@ impl InputTask {
     }
 }
 
-async fn output_results<W>(
-    mut printer: Printer<W>,
-    mut results_rx: UnboundedReceiver<(PathBuf, Result<RunReport, Error>)>,
-) where
-    W: AsyncWrite,
-{
-    while let Some((patch, result)) = results_rx.recv().await {
-        let err = printer.print(&patch, result.as_ref()).await.err();
-        if let Some(err) = err {
-            eprintln!(
-                "failed to output results for patch {}: {}",
-                patch.display(),
-                err
-            );
+fn print_result(patch: &Path, result: Result<&RunReport, &Error>) {
+    let result_col = match result {
+        Ok(report) if report.build().err().is_some() => "build failed".into(),
+        Ok(report) => {
+            let failed_tests = report
+                .tests()
+                .iter()
+                .filter_map(|(name, report)| report.err().is_some().then_some(&name[..]))
+                .collect::<Vec<_>>()
+                .join(",");
+            if failed_tests.is_empty() {
+                "OK".into()
+            } else {
+                failed_tests
+            }
         }
-    }
+        Err(error) => format!("error during testing: {}", error),
+    };
+
+    println!("{};{}", patch.display(), result_col);
+}
+
+async fn save_report(reports_dir: &Path, patch: &Path, report: &RunReport) -> io::Result<()> {
+    let stem = patch
+        .file_stem()
+        .ok_or_else(|| io::Error::new(ErrorKind::Other, "patch has no stem"))?;
+
+    let mut buf = Vec::with_capacity(4096);
+    serde_yaml::to_writer(&mut buf, report).map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+
+    let mut path = reports_dir.join(stem);
+    path.set_extension("yaml");
+    fs::write(path, buf).await
 }
 
 #[tokio::main]
@@ -201,7 +217,7 @@ async fn main() {
         None => MaybeTmp::default(),
     };
 
-    let (report_tx, report_rx) = mpsc::unbounded_channel();
+    let (report_tx, mut report_rx) = mpsc::unbounded_channel();
     let (patch_tx, patch_rx) = mpsc::unbounded_channel();
 
     let tester_task = {
@@ -217,12 +233,36 @@ async fn main() {
     };
     let input_task = task::spawn(InputTask::new(patch_tx).run());
 
-    let printer = Printer::new(reports.path().to_path_buf(), tokio::io::stdout());
-    output_results(printer, report_rx).await;
+    let mut total = 0;
+    let mut failed = 0;
+    while let Some((patch, result)) = report_rx.recv().await {
+        total += 1;
+        if result.is_err() {
+            failed += 1;
+        }
+
+        print_result(&patch, result.as_ref());
+        if let Ok(report) = result {
+            if let Err(error) = save_report(reports.path(), &patch, &report).await {
+                eprintln!(
+                    "Failed to save the test for the patch {}, error: {:?}",
+                    patch.display(),
+                    error
+                );
+            }
+        }
+    }
 
     tester_task.await.expect("an internal task panicked");
     input_task
         .await
         .expect("an internal task panicked")
         .expect("an IO error occurred");
+
+    eprintln!("Finished");
+    eprintln!("{} solution(s) processed", total);
+    if failed > 0 {
+        eprintln!("Processing {} solution(s) failed", failed);
+    }
+    eprintln!("Detailed reports saved in {}", reports.path().display());
 }

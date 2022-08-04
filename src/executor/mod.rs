@@ -1,4 +1,5 @@
 use crate::{ssh::SshAction, Error, Output};
+use serde::Serialize;
 use std::{
     ffi::{OsStr, OsString},
     time::Duration,
@@ -21,7 +22,7 @@ pub struct ExecutorConfig {
     pub poweroff_command: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ActionReport {
     pub action: SshAction,
     pub timeout: Duration,
@@ -36,7 +37,7 @@ impl ActionReport {
 }
 
 /// A report from executing a sequence of actions on a [crate::qemu::QemuInstance].
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ExecutorReport {
     /// Path to the image used by the [crate::qemu::QemuInstance].
     image: OsString,

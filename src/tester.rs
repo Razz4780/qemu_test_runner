@@ -4,6 +4,7 @@ use crate::{
     ssh::SshAction,
     Error,
 };
+use serde::Serialize;
 use std::{
     collections::HashMap,
     io::{self, ErrorKind},
@@ -62,7 +63,7 @@ pub struct RunConfig {
     pub tests: HashMap<String, Scenario>,
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize)]
 pub struct ScenarioReport {
     images: Vec<PathBuf>,
     attempts: Vec<Vec<ExecutorReport>>,
@@ -90,6 +91,7 @@ impl ScenarioReport {
     }
 }
 
+#[derive(Serialize)]
 pub struct RunReport {
     build: ScenarioReport,
     tests: HashMap<String, ScenarioReport>,
