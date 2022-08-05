@@ -69,7 +69,7 @@ impl PatchValidator {
             && filename[2..8].chars().all(|c| c.is_ascii_digit())
     }
 
-    pub async fn validate(&mut self, path: PathBuf) -> Result<Patch, ValidationError> {
+    pub async fn validate(&mut self, path: &Path) -> Result<Patch, ValidationError> {
         let filename = path
             .file_name()
             .ok_or(ValidationError::NoFilename)?
@@ -88,12 +88,14 @@ impl PatchValidator {
 
         match self.seen_patches.entry(filename.to_string()) {
             Entry::Vacant(e) => {
-                e.insert(path.clone());
+                e.insert(path.to_path_buf());
             }
             Entry::Occupied(e) => return Err(ValidationError::AlreadySeen(e.get().clone())),
         }
 
-        Ok(Patch { path })
+        Ok(Patch {
+            path: path.to_path_buf(),
+        })
     }
 }
 
@@ -121,24 +123,24 @@ mod tests {
         let dir_path = tmp.path().join("aa111111.patch");
         fs::create_dir(&dir_path).await.unwrap();
         validator
-            .validate(dir_path)
+            .validate(&dir_path)
             .await
             .expect_err("directory should not pass");
 
         validator
-            .validate(tmp.path().join("aa222222.patch"))
+            .validate(&tmp.path().join("aa222222.patch"))
             .await
             .expect_err("non-existent path should not pass");
 
         validator
-            .validate("/".into())
+            .validate("/".as_ref())
             .await
             .expect_err("no filename should not pass");
 
         let file_path = tmp.path().join("aa333333.pat");
         fs::write(&file_path, &[]).await.unwrap();
         validator
-            .validate(file_path)
+            .validate(&file_path)
             .await
             .expect_err("invalid filename should not pass");
 
@@ -149,13 +151,13 @@ mod tests {
         let file_2_path = dir.join("aa444444.patch");
         fs::write(&file_2_path, &[]).await.unwrap();
         let patch = validator
-            .validate(file_1_path.clone())
+            .validate(&file_1_path)
             .await
             .expect("valid path should pass");
         assert_eq!(patch.path(), file_1_path.as_path());
         assert_eq!(patch.id(), "aa444444");
         let error = validator
-            .validate(file_2_path)
+            .validate(&file_2_path)
             .await
             .expect_err("duplicate id should not pass");
         assert!(matches!(error, ValidationError::AlreadySeen(p) if p == file_1_path));

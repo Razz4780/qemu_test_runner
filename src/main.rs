@@ -1,12 +1,12 @@
 use clap::Parser;
 use qemu_test_runner::{
     config::Config,
+    patch_validator::{Patch, PatchValidator},
     qemu::{ImageBuilder, QemuConfig, QemuSpawner},
     tester::{PatchProcessor, RunConfig, RunReport, Tester},
     Error,
 };
 use std::{
-    collections::HashSet,
     ffi::OsString,
     io::{self, ErrorKind},
     path::{Path, PathBuf},
@@ -112,7 +112,7 @@ impl Default for MaybeTmp {
 
 struct TesterTask {
     tester: Tester,
-    patch_source: UnboundedReceiver<PathBuf>,
+    patch_source: UnboundedReceiver<Patch>,
 }
 
 impl TesterTask {
@@ -126,15 +126,15 @@ impl TesterTask {
 }
 
 struct InputTask {
-    patch_sink: UnboundedSender<PathBuf>,
-    seen_patches: HashSet<OsString>,
+    patch_sink: UnboundedSender<Patch>,
+    validator: PatchValidator,
 }
 
 impl InputTask {
-    fn new(patch_sink: UnboundedSender<PathBuf>) -> Self {
+    fn new(patch_sink: UnboundedSender<Patch>) -> Self {
         Self {
             patch_sink,
-            seen_patches: Default::default(),
+            validator: Default::default(),
         }
     }
     async fn run(mut self) -> io::Result<()> {
@@ -143,22 +143,16 @@ impl InputTask {
         let mut buf = String::new();
 
         while reader.read_line(&mut buf).await? > 0 {
-            let patch = PathBuf::from(&buf);
+            let path = PathBuf::from(&buf);
             buf.clear();
 
-            let stem = match patch.file_stem() {
-                Some(stem) if self.seen_patches.contains(stem) => {
-                    eprintln!("patch {} already seen", stem.to_string_lossy());
-                    continue;
-                }
-                Some(stem) => stem.to_os_string(),
-                None => {
-                    eprintln!("path {} does not have a stem", patch.display());
+            let patch = match self.validator.validate(path.as_path()).await {
+                Ok(patch) => patch,
+                Err(error) => {
+                    eprintln!("Invalid path {}: {}", path.display(), error);
                     continue;
                 }
             };
-
-            self.seen_patches.insert(stem);
 
             if self.patch_sink.send(patch).is_err() {
                 break;
@@ -169,7 +163,7 @@ impl InputTask {
     }
 }
 
-fn print_result(patch: &Path, result: Result<&RunReport, &Error>) {
+fn print_result(patch: &Patch, result: Result<&RunReport, &Error>) {
     let result_col = match result {
         Ok(report) if report.build().err().is_some() => "build failed".into(),
         Ok(report) => {
@@ -188,18 +182,14 @@ fn print_result(patch: &Path, result: Result<&RunReport, &Error>) {
         Err(error) => format!("error during testing: {}", error),
     };
 
-    println!("{};{}", patch.display(), result_col);
+    println!("{};{};{}", patch.id(), patch.path().display(), result_col);
 }
 
-async fn save_report(reports_dir: &Path, patch: &Path, report: &RunReport) -> io::Result<()> {
-    let stem = patch
-        .file_stem()
-        .ok_or_else(|| io::Error::new(ErrorKind::Other, "patch has no stem"))?;
-
+async fn save_report(reports_dir: &Path, patch: &Patch, report: &RunReport) -> io::Result<()> {
     let mut buf = Vec::with_capacity(4096);
     serde_yaml::to_writer(&mut buf, report).map_err(|e| io::Error::new(ErrorKind::Other, e))?;
 
-    let mut path = reports_dir.join(stem);
+    let mut path = reports_dir.join(patch.id());
     path.set_extension("yaml");
     fs::write(path, buf).await
 }
@@ -246,7 +236,7 @@ async fn main() {
             if let Err(error) = save_report(reports.path(), &patch, &report).await {
                 eprintln!(
                     "Failed to save the test for the patch {}, error: {:?}",
-                    patch.display(),
+                    patch.path().display(),
                     error
                 );
             }
