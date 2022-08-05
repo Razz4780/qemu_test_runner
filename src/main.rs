@@ -133,7 +133,12 @@ async fn main() {
         };
         task::spawn(task.run())
     };
-    let input_task = task::spawn(InputTask::new(patch_tx).run());
+    let input_task = task::spawn(async move {
+        InputTask::new(patch_tx)
+            .run()
+            .await
+            .expect("an IO error occurred")
+    });
 
     let mut total = 0;
     let mut failed = 0;
@@ -155,11 +160,7 @@ async fn main() {
         }
     }
 
-    tester_task.await.expect("an internal task panicked");
-    input_task
-        .await
-        .expect("an internal task panicked")
-        .expect("an IO error occurred");
+    tokio::try_join!(tester_task, input_task).expect("an internal task panicked");
 
     eprintln!("Finished");
     eprintln!("{} solution(s) processed", total);
