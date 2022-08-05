@@ -11,6 +11,7 @@ use tokio::fs;
 pub enum ConfigError {
     Serde(serde_yaml::Error),
     Io(io::Error),
+    NoParent,
 }
 
 impl From<serde_yaml::Error> for ConfigError {
@@ -118,6 +119,7 @@ impl StepConfig {
 
     async fn normalize_path(&mut self, base: &Path) -> io::Result<()> {
         if let Self::FileTransfer { from, .. } = self {
+            println!("{}", base.join(from.as_path()).display());
             let normalized = fs::canonicalize(base.join(from.as_path())).await?;
             *from = normalized;
         }
@@ -197,12 +199,14 @@ impl Config {
             serde_yaml::from_slice(&bytes[..])?
         };
 
+        let parent = path.parent().ok_or(ConfigError::NoParent)?;
+
         if let Some(scenario) = config.build.as_mut() {
-            scenario.normalize_paths(path).await?;
+            scenario.normalize_paths(parent).await?;
         }
 
         for scenario in config.tests.values_mut() {
-            scenario.normalize_paths(path).await?;
+            scenario.normalize_paths(parent).await?;
         }
 
         Ok(config)
@@ -305,5 +309,69 @@ mod tests {
             }
             other => panic!("unexpected enum option: {:?}", other),
         }
+    }
+
+    impl StepConfig {
+        fn transfer_from(&self) -> &Path {
+            match self {
+                Self::FileTransfer { from, .. } => from.as_path(),
+                _ => panic!("unexpected enum variant: {:?}", self),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("wow"), &[]).await.unwrap();
+        let dir = tmp.path().join("dir");
+        fs::create_dir(&dir).await.unwrap();
+        fs::write(dir.join("wow"), &[]).await.unwrap();
+
+        let mut scenario = ScenarioConfig {
+            retries: Some(4),
+            steps: vec![vec![
+                StepConfig::FileTransfer {
+                    from: dir.clone(),
+                    to: "wow".into(),
+                    mode: None,
+                    timeout_ms: None,
+                },
+                StepConfig::FileTransfer {
+                    from: "wow".into(),
+                    to: "wow".into(),
+                    mode: None,
+                    timeout_ms: None,
+                },
+                StepConfig::FileTransfer {
+                    from: "./wow".into(),
+                    to: "wow".into(),
+                    mode: None,
+                    timeout_ms: None,
+                },
+                StepConfig::FileTransfer {
+                    from: "../wow".into(),
+                    to: "../wow".into(),
+                    mode: None,
+                    timeout_ms: None,
+                },
+            ]],
+        };
+
+        scenario
+            .normalize_paths(dir.as_path())
+            .await
+            .expect("normalization should not fail");
+
+        assert_eq!(scenario.steps[0][0].transfer_from(), dir.as_path());
+        assert_eq!(
+            scenario.steps[0][1].transfer_from(),
+            dir.as_path().join("wow")
+        );
+        assert_eq!(
+            scenario.steps[0][2].transfer_from(),
+            dir.as_path().join("wow")
+        );
+        assert_eq!(scenario.steps[0][3].transfer_from(), tmp.path().join("wow"));
     }
 }
