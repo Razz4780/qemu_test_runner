@@ -1,5 +1,5 @@
 use std::{
-    io::ErrorKind,
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
 };
 use tempfile::TempDir;
@@ -11,14 +11,21 @@ pub enum MaybeTmp {
 }
 
 impl MaybeTmp {
-    pub async fn at_path(path: PathBuf) -> Self {
+    pub async fn at_path(path: &Path) -> io::Result<Self> {
+        let path = fs::canonicalize(path).await?;
+
         if let Err(e) = fs::create_dir_all(&path).await {
             if e.kind() != ErrorKind::AlreadyExists {
-                panic!("failed to access directory {}: {}", path.display(), e);
+                return Err(e);
             }
         }
 
-        Self::NotTmp(path)
+        Ok(Self::NotTmp(path))
+    }
+
+    pub fn tmp() -> io::Result<Self> {
+        let dir = tempfile::tempdir()?;
+        Ok(Self::Tmp(dir))
     }
 
     pub fn path(&self) -> &Path {
@@ -26,12 +33,5 @@ impl MaybeTmp {
             Self::Tmp(tmp) => tmp.path(),
             Self::NotTmp(path) => path.as_path(),
         }
-    }
-}
-
-impl Default for MaybeTmp {
-    fn default() -> Self {
-        let dir = tempfile::tempdir().expect("failed to create a temporary directory");
-        Self::Tmp(dir)
     }
 }

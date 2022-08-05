@@ -3,8 +3,27 @@ use crate::{
     ssh::SshAction,
     tester::{RunConfig, Scenario, Step},
 };
-use serde::Deserialize;
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, io, path::Path, path::PathBuf, time::Duration};
+use tokio::fs;
+
+#[derive(Debug)]
+pub enum ConfigError {
+    Serde(serde_yaml::Error),
+    Io(io::Error),
+}
+
+impl From<serde_yaml::Error> for ConfigError {
+    fn from(error: serde_yaml::Error) -> Self {
+        Self::Serde(error)
+    }
+}
+
+impl From<io::Error> for ConfigError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
 
 mod defaults {
     pub fn user() -> String {
@@ -36,7 +55,7 @@ mod defaults {
     }
 }
 
-#[derive(Deserialize, PartialEq, Debug)]
+#[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StepConfig {
     FileTransfer {
@@ -96,9 +115,18 @@ impl StepConfig {
             },
         }
     }
+
+    async fn normalize_path(&mut self, base: &Path) -> io::Result<()> {
+        if let Self::FileTransfer { from, .. } = self {
+            let normalized = fs::canonicalize(base.join(from.as_path())).await?;
+            *from = normalized;
+        }
+
+        Ok(())
+    }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ScenarioConfig {
     pub retries: Option<usize>,
     pub steps: Vec<Vec<StepConfig>>,
@@ -127,9 +155,19 @@ impl ScenarioConfig {
             steps,
         }
     }
+
+    async fn normalize_paths(&mut self, base: &Path) -> io::Result<()> {
+        for steps in &mut self.steps {
+            for step in steps {
+                step.normalize_path(base).await?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "defaults::user")]
     pub user: String,
@@ -150,6 +188,25 @@ pub struct Config {
     pub build: Option<ScenarioConfig>,
     pub tests: HashMap<String, ScenarioConfig>,
     pub output_limit: Option<u64>,
+}
+
+impl Config {
+    pub async fn from_file(path: &Path) -> Result<Self, ConfigError> {
+        let mut config: Self = {
+            let bytes = fs::read(path).await?;
+            serde_yaml::from_slice(&bytes[..])?
+        };
+
+        if let Some(scenario) = config.build.as_mut() {
+            scenario.normalize_paths(path).await?;
+        }
+
+        for scenario in config.tests.values_mut() {
+            scenario.normalize_paths(path).await?;
+        }
+
+        Ok(config)
+    }
 }
 
 impl From<Config> for RunConfig {

@@ -52,11 +52,9 @@ struct Args {
 
 async fn make_patch_processor(args: Args) -> PatchProcessor {
     let run_config: RunConfig = {
-        let bytes = fs::read(&args.suite)
+        let config = Config::from_file(&args.suite)
             .await
-            .expect("failed to read the suite file");
-        let config: Config =
-            serde_yaml::from_slice(&bytes[..]).expect("failed to parse the suite file");
+            .expect("failed to process the config file");
         config.try_into().expect("invalid suite configuration")
     };
 
@@ -70,7 +68,9 @@ async fn make_patch_processor(args: Args) -> PatchProcessor {
     PatchProcessor {
         spawner: QemuSpawner::new(args.concurrency, qemu_config),
         builder: ImageBuilder { cmd: args.qemu_img },
-        base_image: args.minix_base,
+        base_image: fs::canonicalize(args.minix_base)
+            .await
+            .expect("failed to canonicalize the base image path"),
         run_config,
     }
 }
@@ -110,13 +110,17 @@ async fn save_report(reports_dir: &Path, patch: &Patch, report: &RunReport) -> i
 async fn main() {
     let args = Args::parse();
 
-    let artifacts = match args.artifacts.clone() {
-        Some(path) => MaybeTmp::at_path(path).await,
-        None => MaybeTmp::default(),
+    let artifacts = match args.artifacts.as_ref() {
+        Some(path) => MaybeTmp::at_path(path)
+            .await
+            .expect("failed to access the artifacts directory"),
+        None => MaybeTmp::tmp().expect("failed to create a temporary directory"),
     };
-    let reports = match args.reports.clone() {
-        Some(path) => MaybeTmp::at_path(path).await,
-        None => MaybeTmp::default(),
+    let reports = match args.reports.as_ref() {
+        Some(path) => MaybeTmp::at_path(path)
+            .await
+            .expect("failed to access the artifacts directory"),
+        None => MaybeTmp::tmp().expect("failed to create a temporary directory"),
     };
 
     let (report_tx, mut report_rx) = mpsc::unbounded_channel();
