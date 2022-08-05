@@ -1,6 +1,7 @@
 use clap::Parser;
 use qemu_test_runner::{
     config::Config,
+    maybe_tmp::MaybeTmp,
     patch_validator::{Patch, PatchValidator},
     qemu::{ImageBuilder, QemuConfig, QemuSpawner},
     tester::{PatchProcessor, RunConfig, RunReport, Tester},
@@ -12,7 +13,6 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tempfile::TempDir;
 use tokio::{
     fs,
     io::{AsyncBufReadExt, BufReader},
@@ -76,37 +76,6 @@ async fn make_patch_processor(args: Args) -> PatchProcessor {
         builder: ImageBuilder { cmd: args.qemu_img },
         base_image: args.minix_base,
         run_config,
-    }
-}
-
-enum MaybeTmp {
-    Tmp(TempDir),
-    NotTmp(PathBuf),
-}
-
-impl MaybeTmp {
-    async fn at_path(path: PathBuf) -> Self {
-        if let Err(e) = fs::create_dir_all(&path).await {
-            if e.kind() != ErrorKind::AlreadyExists {
-                panic!("failed to access directory {}: {}", path.display(), e);
-            }
-        }
-
-        Self::NotTmp(path)
-    }
-
-    fn path(&self) -> &Path {
-        match self {
-            Self::Tmp(tmp) => tmp.path(),
-            Self::NotTmp(path) => path.as_path(),
-        }
-    }
-}
-
-impl Default for MaybeTmp {
-    fn default() -> Self {
-        let dir = tempfile::tempdir().expect("failed to create a temporary directory");
-        Self::Tmp(dir)
     }
 }
 

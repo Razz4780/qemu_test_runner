@@ -7,9 +7,11 @@ use tokio::time::error::Elapsed;
 
 pub mod config;
 pub mod executor;
+pub mod maybe_tmp;
 pub mod patch_validator;
 pub mod qemu;
 pub mod ssh;
+pub mod tasks;
 pub mod tester;
 
 /// An error that can occurr when executing a command.
