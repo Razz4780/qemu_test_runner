@@ -2,8 +2,9 @@ use clap::Parser;
 use qemu_test_runner::{
     config::Config,
     maybe_tmp::MaybeTmp,
-    patch_validator::{Patch, PatchValidator},
+    patch_validator::Patch,
     qemu::{ImageBuilder, QemuConfig, QemuSpawner},
+    tasks::{InputTask, TesterTask},
     tester::{PatchProcessor, RunConfig, RunReport, Tester},
     Error,
 };
@@ -13,12 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{
-    fs,
-    io::{AsyncBufReadExt, BufReader},
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
-    task,
-};
+use tokio::{fs, sync::mpsc, task};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -76,59 +72,6 @@ async fn make_patch_processor(args: Args) -> PatchProcessor {
         builder: ImageBuilder { cmd: args.qemu_img },
         base_image: args.minix_base,
         run_config,
-    }
-}
-
-struct TesterTask {
-    tester: Tester,
-    patch_source: UnboundedReceiver<Patch>,
-}
-
-impl TesterTask {
-    async fn run(mut self) {
-        while let Some(patch) = self.patch_source.recv().await {
-            if let Err(e) = self.tester.clone().schedule(patch).await {
-                eprintln!("an error occurred: {}", e);
-            }
-        }
-    }
-}
-
-struct InputTask {
-    patch_sink: UnboundedSender<Patch>,
-    validator: PatchValidator,
-}
-
-impl InputTask {
-    fn new(patch_sink: UnboundedSender<Patch>) -> Self {
-        Self {
-            patch_sink,
-            validator: Default::default(),
-        }
-    }
-    async fn run(mut self) -> io::Result<()> {
-        let stdin = tokio::io::stdin();
-        let mut reader = BufReader::new(stdin);
-        let mut buf = String::new();
-
-        while reader.read_line(&mut buf).await? > 0 {
-            let path = PathBuf::from(&buf);
-            buf.clear();
-
-            let patch = match self.validator.validate(path.as_path()).await {
-                Ok(patch) => patch,
-                Err(error) => {
-                    eprintln!("Invalid path {}: {}", path.display(), error);
-                    continue;
-                }
-            };
-
-            if self.patch_sink.send(patch).is_err() {
-                break;
-            }
-        }
-
-        Ok(())
     }
 }
 
