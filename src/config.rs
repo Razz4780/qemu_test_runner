@@ -3,8 +3,28 @@ use crate::{
     ssh::SshAction,
     tester::{RunConfig, Scenario, Step},
 };
-use serde::Deserialize;
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, io, path::Path, path::PathBuf, time::Duration};
+use tokio::fs;
+
+#[derive(Debug)]
+pub enum ConfigError {
+    Serde(serde_yaml::Error),
+    Io(io::Error),
+    NoParent,
+}
+
+impl From<serde_yaml::Error> for ConfigError {
+    fn from(error: serde_yaml::Error) -> Self {
+        Self::Serde(error)
+    }
+}
+
+impl From<io::Error> for ConfigError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
 
 mod defaults {
     pub fn user() -> String {
@@ -36,7 +56,7 @@ mod defaults {
     }
 }
 
-#[derive(Deserialize, PartialEq, Debug)]
+#[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StepConfig {
     FileTransfer {
@@ -96,9 +116,19 @@ impl StepConfig {
             },
         }
     }
+
+    async fn normalize_path(&mut self, base: &Path) -> io::Result<()> {
+        if let Self::FileTransfer { from, .. } = self {
+            println!("{}", base.join(from.as_path()).display());
+            let normalized = fs::canonicalize(base.join(from.as_path())).await?;
+            *from = normalized;
+        }
+
+        Ok(())
+    }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ScenarioConfig {
     pub retries: Option<usize>,
     pub steps: Vec<Vec<StepConfig>>,
@@ -127,9 +157,19 @@ impl ScenarioConfig {
             steps,
         }
     }
+
+    async fn normalize_paths(&mut self, base: &Path) -> io::Result<()> {
+        for steps in &mut self.steps {
+            for step in steps {
+                step.normalize_path(base).await?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "defaults::user")]
     pub user: String,
@@ -150,6 +190,27 @@ pub struct Config {
     pub build: Option<ScenarioConfig>,
     pub tests: HashMap<String, ScenarioConfig>,
     pub output_limit: Option<u64>,
+}
+
+impl Config {
+    pub async fn from_file(path: &Path) -> Result<Self, ConfigError> {
+        let mut config: Self = {
+            let bytes = fs::read(path).await?;
+            serde_yaml::from_slice(&bytes[..])?
+        };
+
+        let parent = path.parent().ok_or(ConfigError::NoParent)?;
+
+        if let Some(scenario) = config.build.as_mut() {
+            scenario.normalize_paths(parent).await?;
+        }
+
+        for scenario in config.tests.values_mut() {
+            scenario.normalize_paths(parent).await?;
+        }
+
+        Ok(config)
+    }
 }
 
 impl From<Config> for RunConfig {
@@ -248,5 +309,69 @@ mod tests {
             }
             other => panic!("unexpected enum option: {:?}", other),
         }
+    }
+
+    impl StepConfig {
+        fn transfer_from(&self) -> &Path {
+            match self {
+                Self::FileTransfer { from, .. } => from.as_path(),
+                _ => panic!("unexpected enum variant: {:?}", self),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("wow"), &[]).await.unwrap();
+        let dir = tmp.path().join("dir");
+        fs::create_dir(&dir).await.unwrap();
+        fs::write(dir.join("wow"), &[]).await.unwrap();
+
+        let mut scenario = ScenarioConfig {
+            retries: Some(4),
+            steps: vec![vec![
+                StepConfig::FileTransfer {
+                    from: dir.clone(),
+                    to: "wow".into(),
+                    mode: None,
+                    timeout_ms: None,
+                },
+                StepConfig::FileTransfer {
+                    from: "wow".into(),
+                    to: "wow".into(),
+                    mode: None,
+                    timeout_ms: None,
+                },
+                StepConfig::FileTransfer {
+                    from: "./wow".into(),
+                    to: "wow".into(),
+                    mode: None,
+                    timeout_ms: None,
+                },
+                StepConfig::FileTransfer {
+                    from: "../wow".into(),
+                    to: "../wow".into(),
+                    mode: None,
+                    timeout_ms: None,
+                },
+            ]],
+        };
+
+        scenario
+            .normalize_paths(dir.as_path())
+            .await
+            .expect("normalization should not fail");
+
+        assert_eq!(scenario.steps[0][0].transfer_from(), dir.as_path());
+        assert_eq!(
+            scenario.steps[0][1].transfer_from(),
+            dir.as_path().join("wow")
+        );
+        assert_eq!(
+            scenario.steps[0][2].transfer_from(),
+            dir.as_path().join("wow")
+        );
+        assert_eq!(scenario.steps[0][3].transfer_from(), tmp.path().join("wow"));
     }
 }

@@ -55,7 +55,7 @@ impl ImageBuilder {
             .arg("-f")
             .arg(dst.format())
             .arg("-b")
-            .arg(src.path().canonicalize()?)
+            .arg(src.path())
             .arg("-F")
             .arg(src.format())
             .arg(dst.path())
