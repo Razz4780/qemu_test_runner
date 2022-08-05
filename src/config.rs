@@ -149,6 +149,7 @@ pub struct Config {
     pub file_mode: i32,
     pub build: Option<ScenarioConfig>,
     pub tests: HashMap<String, ScenarioConfig>,
+    pub output_limit: Option<u64>,
 }
 
 impl From<Config> for RunConfig {
@@ -168,6 +169,7 @@ impl From<Config> for RunConfig {
                 connection_timeout: Duration::from_millis(config.ssh_timeout_ms),
                 poweroff_timeout: Duration::from_millis(config.poweroff_timeout_ms),
                 poweroff_command: config.poweroff_command,
+                output_limit: config.output_limit,
             },
             build: config.build.map(make_scenario).unwrap_or_default(),
             tests: config
@@ -232,6 +234,7 @@ mod tests {
                 }]],
             }),
             tests: Default::default(),
+            output_limit: None,
         };
 
         let run_config = RunConfig::from(config);
