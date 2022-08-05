@@ -43,11 +43,11 @@ struct SshWorker {
     session: Session,
     /// The channel for new [Work] to do.
     receiver: mpsc::Receiver<Work>,
+    /// Limit for stdout and stderr of executed commands.
+    output_limit: Option<u64>,
 }
 
 impl SshWorker {
-    const OUTPUT_SIZE_LIMIT: u64 = 1024 * 8;
-
     /// Opens a new [Session] with the given parameters.
     /// This is a blocking method.
     fn open_session(addr: SocketAddr, username: &str, password: &str) -> io::Result<Session> {
@@ -88,15 +88,16 @@ impl SshWorker {
         channel.exec(cmd).map_err(io::Error::from)?;
 
         let mut stdout = Vec::new();
-        (&mut channel)
-            .take(Self::OUTPUT_SIZE_LIMIT)
-            .read_to_end(&mut stdout)?;
+        match self.output_limit {
+            Some(limit) => (&mut channel).take(limit).read_to_end(&mut stdout)?,
+            None => channel.read_to_end(&mut stdout)?,
+        };
 
         let mut stderr = Vec::new();
-        channel
-            .stderr()
-            .take(Self::OUTPUT_SIZE_LIMIT)
-            .read_to_end(&mut stderr)?;
+        match self.output_limit {
+            Some(limit) => channel.stderr().take(limit).read_to_end(&mut stderr)?,
+            None => channel.stderr().read_to_end(&mut stderr)?,
+        };
 
         channel.wait_close()?;
         let exit_status = channel.exit_status()?;
@@ -140,7 +141,12 @@ pub struct SshHandle {
 
 impl SshHandle {
     /// Creates a new instance of this struct.
-    pub async fn new(addr: SocketAddr, username: String, password: String) -> io::Result<Self> {
+    pub async fn new(
+        addr: SocketAddr,
+        username: String,
+        password: String,
+        output_limit: Option<u64>,
+    ) -> io::Result<Self> {
         let session = task::spawn_blocking(move || loop {
             let res = SshWorker::open_session(addr, &username, &password);
             if let Ok(session) = res {
@@ -162,6 +168,7 @@ impl SshHandle {
         let worker = SshWorker {
             session,
             receiver: rx,
+            output_limit,
         };
         task::spawn_blocking(move || worker.run());
 

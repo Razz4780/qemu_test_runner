@@ -20,6 +20,8 @@ pub struct ExecutorConfig {
     pub poweroff_timeout: Duration,
     /// The command that will be used to shutdown the [crate::qemu::QemuInstance].
     pub poweroff_command: String,
+    /// A limit for stdout and stderr of executed commands.
+    pub output_limit: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
