@@ -1,5 +1,6 @@
 use crate::{
     executor::{stack::StackExecutor, ExecutorConfig, ExecutorReport},
+    patch_validator::Patch,
     qemu::{Image, ImageBuilder, QemuSpawner},
     ssh::SshAction,
     Error,
@@ -275,19 +276,16 @@ impl PatchProcessor {
 pub struct Tester {
     pub processor: Arc<PatchProcessor>,
     pub artifacts_root: PathBuf,
-    pub reports_sink: UnboundedSender<(PathBuf, Result<RunReport, Error>)>,
+    pub reports_sink: UnboundedSender<(Patch, Result<RunReport, Error>)>,
 }
 
 impl Tester {
-    pub async fn schedule(self, patch: PathBuf) -> io::Result<()> {
-        let stem = patch
-            .file_stem()
-            .ok_or_else(|| io::Error::new(ErrorKind::Other, "path has no stem"))?;
-        let artifacts = self.artifacts_root.join(stem);
+    pub async fn schedule(self, patch: Patch) -> io::Result<()> {
+        let artifacts = self.artifacts_root.join(patch.id());
         prepare_dir(&artifacts).await?;
 
         task::spawn(async move {
-            let res = self.processor.process(&patch, &artifacts).await;
+            let res = self.processor.process(patch.path(), &artifacts).await;
             self.reports_sink.send((patch, res))
         });
 

@@ -15,3 +15,6 @@ tempfile = "3.3.0"
 clap = { version = "3.2.16", features = ["derive"] }
 serde = { version = "1.0.140", features = ["derive"] }
 serde_yaml = "0.9.3"
+
+[dev-dependencies]
+test-case = "2.2.1"
