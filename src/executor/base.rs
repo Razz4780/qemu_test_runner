@@ -2,20 +2,20 @@ use super::{ActionReport, ExecutorConfig, ExecutorReport};
 use crate::{
     qemu::QemuInstance,
     ssh::{SshAction, SshHandle},
-    Error,
+    Output,
 };
 use std::{
     io,
     time::{Duration, Instant},
 };
-use tokio::time::{self, error::Elapsed};
+use tokio::time;
 
 /// A wrapper over a [QemuInstance].
 /// Used to interact with the instance over SSH.
 pub struct BaseExecutor<'a> {
     qemu: QemuInstance,
     config: &'a ExecutorConfig,
-    ssh: Result<SshHandle, Error>,
+    ssh: Option<SshHandle>,
     reports: Vec<ActionReport>,
 }
 
@@ -35,19 +35,18 @@ impl<'a> BaseExecutor<'a> {
                         )
                         .await
                     }
-                    Err(error) => Err(error),
+                    Err(e) => Err(e),
                 };
 
                 if let Ok(handle) = handle {
-                    return handle;
+                    break handle;
                 }
 
                 time::sleep(Duration::from_millis(100)).await;
             }
         })
         .await
-        .map_err(io::Error::from)
-        .map_err(Into::into);
+        .ok();
 
         Self {
             qemu,
@@ -57,18 +56,22 @@ impl<'a> BaseExecutor<'a> {
         }
     }
 
-    pub async fn run(&mut self, action: SshAction, timeout: Duration) -> Result<(), &Error> {
-        let ssh = self.ssh.as_mut()?;
+    /// Return - success
+    pub async fn run(&mut self, action: SshAction, timeout: Duration) -> io::Result<bool> {
+        let ssh = match self.ssh.as_mut() {
+            Some(ssh) => ssh,
+            None => return Ok(false),
+        };
 
         let start = Instant::now();
-
         let res = time::timeout(timeout, ssh.exec(action.clone())).await;
         let elapsed_time = start.elapsed();
+
         let output = match res {
-            Ok(Ok(output)) => Ok(output),
-            Ok(Err(error)) => Err(error),
-            Err(error) => Err(error.into()),
+            Ok(res) => res?,
+            Err(_) => Output::Timeout,
         };
+        let success = output.success();
 
         self.reports.push(ActionReport {
             action,
@@ -77,53 +80,56 @@ impl<'a> BaseExecutor<'a> {
             output,
         });
 
-        self.reports
-            .last()
-            .and_then(ActionReport::err)
-            .map(Err)
-            .unwrap_or(Ok(()))
+        Ok(success)
     }
 
-    pub async fn finish(mut self) -> ExecutorReport {
-        if let Ok(ssh) = self.ssh.as_mut() {
-            let action = SshAction::Exec {
-                cmd: self.config.poweroff_command.clone(),
-            };
+    pub async fn finish(mut self) -> io::Result<ExecutorReport> {
+        let image = self.qemu.image_path().to_os_string();
 
-            let res: Result<Result<(), io::Error>, Elapsed> =
-                time::timeout(self.config.poweroff_timeout, async {
-                    ssh.exec(action.clone()).await.ok();
+        let (ssh_ok, exit_ok) = match self.ssh.as_mut() {
+            Some(ssh) => {
+                let action = SshAction::Exec {
+                    cmd: self.config.poweroff_command.clone(),
+                };
 
-                    while self.qemu.try_wait()?.is_none() {
-                        time::sleep(Duration::from_millis(100)).await;
+                let res: Result<Result<_, io::Error>, _> =
+                    time::timeout(self.config.poweroff_timeout, async {
+                        ssh.exec(action.clone()).await?;
+
+                        while self.qemu.try_wait()?.is_none() {
+                            time::sleep(Duration::from_millis(100)).await;
+                        }
+
+                        Ok(())
+                    })
+                    .await;
+
+                match res {
+                    Ok(Ok(_)) => {
+                        self.qemu.wait().await?;
+                        (true, true)
                     }
-
-                    Ok(())
-                })
-                .await;
-
-            match res {
-                Ok(Err(_)) => {
-                    self.qemu.kill().await.ok();
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => {
+                        self.qemu.kill().await.ok();
+                        self.qemu.wait().await.ok();
+                        (true, false)
+                    }
                 }
-                Err(_) => {
-                    self.qemu.kill().await.ok();
-                }
-                _ => {}
-            };
-        } else {
-            self.qemu.kill().await.ok();
-        }
+            }
+            None => {
+                self.qemu.kill().await.ok();
+                self.qemu.wait().await.ok();
+                (false, false)
+            }
+        };
 
-        let image = self.qemu.image_path().to_owned();
-        let qemu = self.qemu.wait().await;
-
-        ExecutorReport {
+        Ok(ExecutorReport {
             image,
-            qemu,
-            connect: self.ssh.map(|_| ()),
+            ssh_ok,
             action_reports: self.reports,
-        }
+            exit_ok,
+        })
     }
 }
 
@@ -153,10 +159,10 @@ mod test {
         let mut executor = BaseExecutor::new(qemu, config).await;
 
         for (action, timeout) in actions {
-            executor.run(action, timeout).await.ok();
+            executor.run(action, timeout).await.unwrap();
         }
 
-        executor.finish().await
+        executor.finish().await.unwrap()
     }
 
     #[ignore]
@@ -176,8 +182,10 @@ mod test {
             .await
             .expect("timeout");
 
-        assert!(report.err().is_some());
-        assert!(report.connect().is_some());
+        assert!(!report.success());
+        assert!(!report.ssh_ok);
+        assert!(report.action_reports.is_empty());
+        assert!(!report.exit_ok);
     }
 
     #[ignore]
@@ -202,11 +210,11 @@ mod test {
             .await
             .expect("timeout");
 
-        assert!(report.err().is_some());
-        assert!(report.connect().is_none());
+        assert!(!report.success());
+        assert!(report.ssh_ok);
         assert_eq!(report.action_reports().len(), 1);
-        assert!(report.action_reports()[0].err().is_some());
-        assert!(report.qemu().is_ok());
+        assert!(!report.action_reports()[0].success());
+        assert!(report.exit_ok);
     }
 
     #[ignore]
@@ -226,9 +234,10 @@ mod test {
             .await
             .expect("timeout");
 
-        assert!(report.err().is_some());
-        assert!(report.connect().is_none());
-        assert!(report.qemu().is_err());
+        assert!(!report.success());
+        assert!(report.ssh_ok);
+        assert!(report.action_reports.is_empty());
+        assert!(!report.exit_ok);
     }
 
     #[ignore]
@@ -254,13 +263,10 @@ mod test {
             .await
             .expect("timeout");
 
-        assert!(report.err().is_none());
-        assert!(report.connect().is_none());
-        assert_eq!(report.action_reports().len(), 2);
-        assert!(report
-            .action_reports()
-            .iter()
-            .all(|report| report.err().is_none()));
-        assert!(report.qemu().is_ok());
+        assert!(report.success());
+        assert!(report.ssh_ok);
+        assert_eq!(report.action_reports.len(), 2);
+        assert!(report.action_reports.iter().all(|report| report.success()));
+        assert!(report.exit_ok);
     }
 }

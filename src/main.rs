@@ -7,15 +7,20 @@ use qemu_test_runner::{
     stats::Stats,
     tasks::{InputTask, TesterTask},
     tester::{PatchProcessor, RunConfig, RunReport, Tester},
-    Error,
 };
 use std::{
     ffi::OsString,
     io::{self, ErrorKind},
+    ops::Not,
     path::{Path, PathBuf},
+    process::ExitCode,
     sync::Arc,
 };
-use tokio::{fs, sync::mpsc, task};
+use tokio::{
+    fs,
+    sync::mpsc::{self, UnboundedReceiver},
+    task,
+};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -76,26 +81,25 @@ async fn make_patch_processor(args: Args) -> PatchProcessor {
     }
 }
 
-fn print_result(patch: &Patch, result: Result<&RunReport, &Error>) {
-    let result_col = match result {
-        Ok(report) if report.build().err().is_some() => "build failed".into(),
-        Ok(report) => {
-            let failed_tests = report
-                .tests()
-                .iter()
-                .filter_map(|(name, report)| report.err().is_some().then_some(&name[..]))
-                .collect::<Vec<_>>()
-                .join(",");
-            if failed_tests.is_empty() {
-                "OK".into()
-            } else {
-                failed_tests
-            }
+fn print_result(patch: &Patch, report: &RunReport) {
+    let report_col = if report.build().success() {
+        let failed_tests = report
+            .tests()
+            .iter()
+            .filter_map(|(name, report)| report.success().not().then_some(&name[..]))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        if failed_tests.is_empty() {
+            "OK".into()
+        } else {
+            failed_tests
         }
-        Err(error) => format!("error during testing: {}", error),
+    } else {
+        "build failed".into()
     };
 
-    println!("{};{};{}", patch.id(), patch.path().display(), result_col);
+    println!("{};{};{}", patch.id(), patch.path().display(), report_col);
 }
 
 async fn save_report(reports_dir: &Path, patch: &Patch, report: &RunReport) -> io::Result<()> {
@@ -107,62 +111,38 @@ async fn save_report(reports_dir: &Path, patch: &Patch, report: &RunReport) -> i
     fs::write(path, buf).await
 }
 
-#[tokio::main]
-async fn main() {
-    let args = Args::parse();
-
-    let artifacts = match args.artifacts.as_ref() {
-        Some(path) => MaybeTmp::at_path(path)
-            .await
-            .expect("failed to access the artifacts directory"),
-        None => MaybeTmp::tmp().expect("failed to create a temporary directory"),
-    };
-    let reports = args.reports.clone();
-
-    let (report_tx, mut report_rx) = mpsc::unbounded_channel();
-    let (patch_tx, patch_rx) = mpsc::unbounded_channel();
-
-    let tester_task = {
-        let task = TesterTask {
-            tester: Tester {
-                processor: Arc::new(make_patch_processor(args).await),
-                artifacts_root: artifacts.path().to_path_buf(),
-                reports_sink: report_tx,
-            },
-            patch_source: patch_rx,
-        };
-        task::spawn(task.run())
-    };
-    let input_task = task::spawn(async move {
-        InputTask::new(patch_tx)
-            .run()
-            .await
-            .expect("an IO error occurred")
-    });
-
+async fn consume_results(
+    mut rx: UnboundedReceiver<(Patch, io::Result<RunReport>)>,
+    reports_dir: Option<&Path>,
+) -> Stats {
     let mut stats = Stats::default();
-    while let Some((patch, result)) = report_rx.recv().await {
-        stats.update(patch.path(), result.as_ref());
-        print_result(&patch, result.as_ref());
 
-        if let (Ok(report), Some(path)) = (result, reports.as_ref()) {
-            if let Err(error) = save_report(path, &patch, &report).await {
-                eprintln!(
-                    "Failed to save the report for the patch {}, error: {:?}",
-                    patch.path().display(),
-                    error
-                );
+    while let Some((patch, result)) = rx.recv().await {
+        stats.update(patch.path(), &result);
+
+        if let Ok(report) = &result {
+            print_result(&patch, report);
+
+            if let Some(path) = reports_dir.as_ref() {
+                if let Err(error) = save_report(path, &patch, report).await {
+                    eprintln!(
+                        "Failed to save the report for the patch {}, error: {:?}",
+                        patch.path().display(),
+                        error
+                    );
+                }
             }
         }
     }
 
-    if let Err(e) = tokio::try_join!(tester_task, input_task) {
-        eprintln!("An internal task panicked with error: {}", e);
-        eprintln!("Finishind early");
-    } else {
-        eprintln!("Finished");
+    if let Some(path) = reports_dir {
+        eprintln!("Detailed reports saved in {}", path.display());
     }
 
+    stats
+}
+
+fn print_stats(stats: &Stats) {
     eprintln!(
         "{} solution(s) processed successfuly",
         stats.solutions() - stats.internal_errors().len()
@@ -189,7 +169,66 @@ async fn main() {
             eprintln!("  - {}: {}", test, failures);
         }
     }
-    if let Some(path) = reports {
-        eprintln!("Detailed reports saved in {}", path.display());
+
+    if stats.failed_report_saves() > 0 {
+        eprintln!(
+            "Failed to save {} detailed reports",
+            stats.failed_report_saves()
+        );
+    }
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    let args = Args::parse();
+
+    let artifacts = match args.artifacts.as_ref() {
+        Some(path) => MaybeTmp::at_path(path)
+            .await
+            .expect("failed to access the artifacts directory"),
+        None => MaybeTmp::tmp().expect("failed to create a temporary directory"),
+    };
+    let reports_dir = args.reports.clone();
+
+    let (tester_tx, tester_rx) = mpsc::unbounded_channel();
+    let (input_tx, input_rx) = mpsc::unbounded_channel();
+
+    let tester_task = {
+        let task = TesterTask {
+            tester: Tester {
+                processor: Arc::new(make_patch_processor(args).await),
+                artifacts_root: artifacts.path().to_path_buf(),
+                reports_sink: tester_tx,
+            },
+            patch_source: input_rx,
+        };
+        task::spawn(task.run())
+    };
+    let input_task = task::spawn(async move {
+        InputTask::new(input_tx)
+            .run()
+            .await
+            .expect("an IO error occurred")
+    });
+
+    let stats = consume_results(tester_rx, reports_dir.as_deref()).await;
+
+    let task_error = tokio::try_join!(tester_task, input_task).err();
+    if let Some(e) = task_error.as_ref() {
+        eprintln!("An internal task panicked with error: {}", e);
+        eprintln!("Finishing early");
+    } else {
+        eprintln!("Finished");
+    }
+
+    print_stats(&stats);
+
+    if task_error.is_none()
+        && stats.internal_errors().is_empty()
+        && stats.failed_report_saves() == 0
+    {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }

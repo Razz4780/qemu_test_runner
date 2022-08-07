@@ -1,4 +1,4 @@
-use crate::{Error, Output};
+use crate::Output;
 use serde::Deserialize;
 use serde::Serialize;
 use ssh2::Session;
@@ -36,7 +36,7 @@ pub enum SshAction {
     },
 }
 
-struct Work(SshAction, oneshot::Sender<Result<Output, Error>>);
+struct Work(SshAction, oneshot::Sender<Output>);
 
 /// A worker for executing blocking functions from the [ssh2] crate.
 struct SshWorker {
@@ -66,25 +66,29 @@ impl SshWorker {
     /// This is a blocking method.
     fn run(mut self) {
         while let Some(Work(action, tx)) = self.receiver.blocking_recv() {
-            match action {
-                SshAction::Exec { cmd } => {
-                    let res = self.exec(&cmd);
-                    tx.send(res).ok();
-                }
+            let res = match action {
+                SshAction::Exec { cmd } => self.exec(&cmd),
                 SshAction::Send { from, to, mode } => {
-                    let res = self
-                        .send(&from, &to, mode)
-                        .map(|_| Output::default())
-                        .map_err(Into::into);
-                    tx.send(res).ok();
+                    self.send(&from, &to, mode).map(|_| Output::Finished {
+                        exit_code: Some(0),
+                        stdout: Default::default(),
+                        stderr: Default::default(),
+                    })
                 }
-            }
+            };
+
+            let output = match res {
+                Ok(output) => output,
+                Err(error) => Output::Error { error },
+            };
+
+            tx.send(output).ok();
         }
     }
 
     /// Executes a command on the remote machine.
     /// This is a blocking method.
-    fn exec(&mut self, cmd: &str) -> Result<Output, Error> {
+    fn exec(&mut self, cmd: &str) -> io::Result<Output> {
         let mut channel = self.session.channel_session()?;
         channel.exec(cmd).map_err(io::Error::from)?;
 
@@ -103,18 +107,11 @@ impl SshWorker {
         channel.wait_close()?;
         let exit_status = channel.exit_status()?;
 
-        if exit_status == 0 {
-            Ok(Output {
-                stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&stderr).into_owned(),
-            })
-        } else {
-            Err(Error {
-                error: io::Error::from_raw_os_error(exit_status).into(),
-                stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&stderr).into_owned(),
-            })
-        }
+        Ok(Output::Finished {
+            exit_code: Some(exit_status),
+            stdout,
+            stderr,
+        })
     }
 
     /// Transfers a file to the remote machine.
@@ -193,7 +190,7 @@ impl SshHandle {
     }
 
     /// Executes an [SshAction] on the remote machine.
-    pub async fn exec(&mut self, cmd: SshAction) -> Result<Output, Error> {
+    pub async fn exec(&mut self, cmd: SshAction) -> io::Result<Output> {
         let (tx, rx) = oneshot::channel();
 
         self.sender
@@ -201,7 +198,7 @@ impl SshHandle {
             .await
             .map_err(Self::worker_died)?;
 
-        rx.await.map_err(Self::worker_died)?
+        rx.await.map_err(Self::worker_died)
     }
 }
 
@@ -280,27 +277,31 @@ mod test {
             fs::write(&file_path, b"content")
                 .await
                 .expect("writing to file failed");
-            ssh_handle
+            let output = ssh_handle
                 .exec(SshAction::Send {
                     from: file_path.clone(),
                     to: "dst".into(),
                     mode: 0o777,
                 })
                 .await
-                .expect("file transfer failed");
+                .unwrap();
+            assert!(output.success());
             let output = ssh_handle
                 .exec(SshAction::Exec {
                     cmd: "cat dst".into(),
                 })
                 .await
-                .expect("ls failed");
-            assert!(output.stdout.contains("content"),);
-            ssh_handle
+                .unwrap();
+            assert!(output.success());
+            let stdout = output.stdout().expect("stdout should exist");
+            assert!(String::from_utf8_lossy(stdout).contains("content"),);
+            let output = ssh_handle
                 .exec(SshAction::Exec {
                     cmd: "/sbin/poweroff".into(),
                 })
                 .await
-                .ok();
+                .unwrap();
+            assert!(!output.success());
 
             qemu.wait().await.expect("QEMU process failed");
         })
