@@ -280,3 +280,61 @@ impl QemuSpawner {
         })
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::test_util::Env;
+    use tokio::{task, time};
+
+    #[ignore]
+    #[tokio::test]
+    async fn build_and_run() {
+        let env = Env::read();
+
+        let image = env.base_path().join("image.qcow2");
+
+        env.builder()
+            .create(env.base_image(), Image::Qcow2(image.as_path()))
+            .await
+            .expect("failed to build the image");
+        let mut qemu = env
+            .spawner(1)
+            .spawn(image.into())
+            .await
+            .expect("failed to spawn the QEMU process");
+
+        time::sleep(Duration::from_secs(1)).await;
+        assert!(qemu.try_wait().expect("try_wait failed").is_none());
+        qemu.kill().await.expect("kill failed");
+        assert!(qemu.wait().await.is_err());
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn spawner_concurrency_limit() {
+        let env = Env::read();
+
+        let image_1 = env.base_path().join("image_1.qcow2");
+        let image_2 = env.base_path().join("image_2.qcow2");
+
+        let builder = env.builder();
+        for image in [image_1.as_path(), image_2.as_path()] {
+            builder
+                .create(env.base_image(), Image::Qcow2(image))
+                .await
+                .expect("failed to build the image");
+        }
+
+        let spawner = env.spawner(1);
+        let _qemu = spawner
+            .spawn(image_1.into())
+            .await
+            .expect("failed to spawn the QEMU process");
+
+        let handle = task::spawn(async move { spawner.spawn(image_2.into()).await });
+
+        time::sleep(Duration::from_secs(1)).await;
+        assert!(!handle.is_finished());
+    }
+}
