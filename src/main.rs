@@ -4,6 +4,7 @@ use qemu_test_runner::{
     maybe_tmp::MaybeTmp,
     patch_validator::Patch,
     qemu::{ImageBuilder, QemuConfig, QemuSpawner},
+    stats::Stats,
     tasks::{InputTask, TesterTask},
     tester::{PatchProcessor, RunConfig, RunReport, Tester},
     Error,
@@ -116,12 +117,7 @@ async fn main() {
             .expect("failed to access the artifacts directory"),
         None => MaybeTmp::tmp().expect("failed to create a temporary directory"),
     };
-    let reports = match args.reports.as_ref() {
-        Some(path) => MaybeTmp::at_path(path)
-            .await
-            .expect("failed to access the artifacts directory"),
-        None => MaybeTmp::tmp().expect("failed to create a temporary directory"),
-    };
+    let reports = args.reports.clone();
 
     let (report_tx, mut report_rx) = mpsc::unbounded_channel();
     let (patch_tx, patch_rx) = mpsc::unbounded_channel();
@@ -144,19 +140,15 @@ async fn main() {
             .expect("an IO error occurred")
     });
 
-    let mut total = 0;
-    let mut failed = 0;
+    let mut stats = Stats::default();
     while let Some((patch, result)) = report_rx.recv().await {
-        total += 1;
-        if result.is_err() {
-            failed += 1;
-        }
-
+        stats.update(patch.path(), result.as_ref());
         print_result(&patch, result.as_ref());
-        if let Ok(report) = result {
-            if let Err(error) = save_report(reports.path(), &patch, &report).await {
+
+        if let (Ok(report), Some(path)) = (result, reports.as_ref()) {
+            if let Err(error) = save_report(path, &patch, &report).await {
                 eprintln!(
-                    "Failed to save the test for the patch {}, error: {:?}",
+                    "Failed to save the report for the patch {}, error: {:?}",
                     patch.path().display(),
                     error
                 );
@@ -164,12 +156,40 @@ async fn main() {
         }
     }
 
-    tokio::try_join!(tester_task, input_task).expect("an internal task panicked");
-
-    eprintln!("Finished");
-    eprintln!("{} solution(s) processed", total);
-    if failed > 0 {
-        eprintln!("Processing {} solution(s) failed", failed);
+    if let Err(e) = tokio::try_join!(tester_task, input_task) {
+        eprintln!("An internal task panicked with error: {}", e);
+        eprintln!("Finishind early");
+    } else {
+        eprintln!("Finished");
     }
-    eprintln!("Detailed reports saved in {}", reports.path().display());
+
+    eprintln!(
+        "{} solution(s) processed successfuly",
+        stats.solutions() - stats.internal_errors().len()
+    );
+    if !stats.internal_errors().is_empty() {
+        eprintln!(
+            "{} solution(s) not processed due to internal errors",
+            stats.internal_errors().len()
+        );
+        for path in stats.internal_errors() {
+            eprintln!("  - {}", path.display());
+        }
+    }
+    eprintln!("{} solution(s) did not build", stats.builds_failed());
+    if !stats.test_failures().is_empty() {
+        eprintln!("Tests by failures count:");
+        let mut tests_with_failures = stats
+            .test_failures()
+            .iter()
+            .map(|(test, failures)| (&test[..], *failures))
+            .collect::<Vec<_>>();
+        tests_with_failures.sort_unstable_by_key(|(_, failures)| *failures);
+        for (test, failures) in tests_with_failures.into_iter().rev() {
+            eprintln!("  - {}: {}", test, failures);
+        }
+    }
+    if let Some(path) = reports {
+        eprintln!("Detailed reports saved in {}", path.display());
+    }
 }
