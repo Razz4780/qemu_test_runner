@@ -8,6 +8,7 @@ use std::{
     io::{self, Read},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -147,21 +148,27 @@ impl SshHandle {
         password: String,
         output_limit: Option<u64>,
     ) -> io::Result<Self> {
-        let session = task::spawn_blocking(move || loop {
-            let res = SshWorker::open_session(addr, &username, &password);
-            if let Ok(session) = res {
-                break session;
-            }
+        let session = {
+            let guard = Arc::new(());
+            let weak = Arc::downgrade(&guard);
+            task::spawn_blocking(move || {
+                while weak.strong_count() > 0 {
+                    if let Ok(session) = SshWorker::open_session(addr, &username, &password) {
+                        return session;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
 
-            thread::sleep(Duration::from_millis(100));
-        })
-        .await
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("failed to open an SSH connection: {}", e),
-            )
-        })?;
+                panic!("task cancelled");
+            })
+            .await
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("failed to open an SSH connection: {}", e),
+                )
+            })?
+        };
 
         let (tx, rx) = mpsc::channel(1);
 
@@ -195,5 +202,109 @@ impl SshHandle {
             .map_err(Self::worker_died)?;
 
         rx.await.map_err(Self::worker_died)?
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::{qemu::Image, test_util::Env};
+    use tokio::{fs, time};
+
+    #[ignore]
+    #[tokio::test]
+    async fn ls_and_poweroff() {
+        time::timeout(Duration::from_secs(60), async {
+            let env = Env::read();
+
+            let image = env.base_path().join("image.qcow2");
+
+            env.builder()
+                .create(env.base_image(), Image::Qcow2(image.as_path()))
+                .await
+                .expect("failed to build the image");
+            let qemu = env
+                .spawner(1)
+                .spawn(image.into())
+                .await
+                .expect("failed to spawn the QEMU process");
+
+            let ssh_addr = qemu.ssh().await.expect("failed to get the ssh address");
+
+            let mut ssh_handle = SshHandle::new(ssh_addr, "root".into(), "root".into(), None)
+                .await
+                .expect("failed to get the ssh handle");
+
+            ssh_handle
+                .exec(SshAction::Exec { cmd: "ls".into() })
+                .await
+                .expect("ls failed");
+            ssh_handle
+                .exec(SshAction::Exec {
+                    cmd: "/sbin/poweroff".into(),
+                })
+                .await
+                .ok();
+
+            qemu.wait().await.expect("QEMU process failed");
+        })
+        .await
+        .expect("timeout");
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn file_transfer() {
+        time::timeout(Duration::from_secs(60), async {
+            let env = Env::read();
+
+            let image = env.base_path().join("image.qcow2");
+
+            env.builder()
+                .create(env.base_image(), Image::Qcow2(image.as_path()))
+                .await
+                .expect("failed to build the image");
+            let qemu = env
+                .spawner(1)
+                .spawn(image.into())
+                .await
+                .expect("failed to spawn the QEMU process");
+
+            let ssh_addr = qemu.ssh().await.expect("failed to get the ssh address");
+
+            let mut ssh_handle = SshHandle::new(ssh_addr, "root".into(), "root".into(), None)
+                .await
+                .expect("failed to get the ssh handle");
+
+            let file_path = env.base_path().join("file");
+            fs::write(&file_path, b"content")
+                .await
+                .expect("writing to file failed");
+            ssh_handle
+                .exec(SshAction::Send {
+                    from: file_path.clone(),
+                    to: "dst".into(),
+                    mode: 0o777,
+                })
+                .await
+                .expect("file transfer failed");
+            let output = ssh_handle
+                .exec(SshAction::Exec {
+                    cmd: "cat dst".into(),
+                })
+                .await
+                .expect("ls failed");
+            assert!(output.stdout.contains("content"),);
+            ssh_handle
+                .exec(SshAction::Exec {
+                    cmd: "/sbin/poweroff".into(),
+                })
+                .await
+                .ok();
+
+            qemu.wait().await.expect("QEMU process failed");
+        })
+        .await
+        .expect("timeout");
     }
 }

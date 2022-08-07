@@ -72,7 +72,26 @@ impl ExecutorReport {
         self.connect
             .as_ref()
             .err()
-            .or_else(|| self.action_reports.last().and_then(ActionReport::err))
+            .or_else(|| {
+                self.action_reports
+                    .iter()
+                    .filter_map(ActionReport::err)
+                    .next()
+            })
             .or_else(|| self.qemu.as_ref().err())
+    }
+}
+
+#[cfg(test)]
+impl ExecutorConfig {
+    pub fn test() -> Self {
+        Self {
+            user: "root".into(),
+            password: "root".into(),
+            connection_timeout: Duration::from_secs(20),
+            poweroff_timeout: Duration::from_secs(20),
+            poweroff_command: "/sbin/poweroff".into(),
+            output_limit: None,
+        }
     }
 }

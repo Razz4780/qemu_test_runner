@@ -104,3 +104,84 @@ impl TryFrom<process::Output> for Output {
         }
     }
 }
+
+#[cfg(test)]
+mod test_util {
+    use crate::qemu::{Image, ImageBuilder, QemuConfig, QemuSpawner};
+    use std::{
+        env,
+        ffi::OsString,
+        path::{Path, PathBuf},
+    };
+    use tempfile::TempDir;
+
+    pub struct Env {
+        base_image: PathBuf,
+        run_cmd: OsString,
+        build_cmd: OsString,
+        enable_kvm: bool,
+        tmp: TempDir,
+    }
+
+    impl Env {
+        const BASE_IMAGE_VAR: &'static str = "TEST_BASE_IMAGE";
+        const RUN_CMD_VAR: &'static str = "TEST_RUN_CMD";
+        const BUILD_CMD_VAR: &'static str = "TEST_BUILD_CMD";
+        const ENABLE_KVM_VAR: &'static str = "TEST_ENABLE_KVM";
+
+        fn assert_env(var: &str) -> OsString {
+            env::var_os(var).unwrap_or_else(|| panic!("missing {} environment variable", var))
+        }
+
+        pub fn read() -> Self {
+            let base_image = Self::assert_env(Self::BASE_IMAGE_VAR).into();
+            let run_cmd = Self::assert_env(Self::RUN_CMD_VAR);
+            let build_cmd = Self::assert_env(Self::BUILD_CMD_VAR);
+            let enable_kvm = Self::assert_env(Self::ENABLE_KVM_VAR)
+                .to_str()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "failed to parse the {} environment variable",
+                        Self::ENABLE_KVM_VAR
+                    )
+                });
+
+            let tmp = tempfile::tempdir().expect("failed to create a tmp directory");
+
+            Self {
+                base_image,
+                run_cmd,
+                build_cmd,
+                enable_kvm,
+                tmp,
+            }
+        }
+
+        pub fn base_image(&self) -> Image<'_> {
+            Image::Raw(self.base_image.as_path())
+        }
+
+        pub fn builder(&self) -> ImageBuilder {
+            ImageBuilder {
+                cmd: self.build_cmd.clone(),
+            }
+        }
+
+        pub fn spawner(&self, concurrency: usize) -> QemuSpawner {
+            QemuSpawner::new(
+                concurrency,
+                QemuConfig {
+                    cmd: self.run_cmd.clone(),
+                    memory: 1024,
+                    enable_kvm: self.enable_kvm,
+                    irqchip_off: true,
+                },
+            )
+        }
+
+        pub fn base_path(&self) -> &Path {
+            self.tmp.path()
+        }
+    }
+}

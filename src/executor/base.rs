@@ -2,7 +2,7 @@ use super::{ActionReport, ExecutorConfig, ExecutorReport};
 use crate::{
     qemu::QemuInstance,
     ssh::{SshAction, SshHandle},
-    Error, Output,
+    Error,
 };
 use std::{
     io,
@@ -90,7 +90,6 @@ impl<'a> BaseExecutor<'a> {
                 cmd: self.config.poweroff_command.clone(),
             };
 
-            let start = Instant::now();
             let res: Result<Result<(), io::Error>, Elapsed> =
                 time::timeout(self.config.poweroff_timeout, async {
                     ssh.exec(action.clone()).await.ok();
@@ -102,26 +101,16 @@ impl<'a> BaseExecutor<'a> {
                     Ok(())
                 })
                 .await;
-            let elapsed = start.elapsed();
 
-            let output: Result<Output, Error> = match res {
-                Ok(Ok(_)) => Ok(Output::default()),
-                Ok(Err(error)) => {
+            match res {
+                Ok(Err(_)) => {
                     self.qemu.kill().await.ok();
-                    Err(error.into())
                 }
-                Err(error) => {
+                Err(_) => {
                     self.qemu.kill().await.ok();
-                    Err(error.into())
                 }
+                _ => {}
             };
-
-            self.reports.push(ActionReport {
-                action,
-                timeout: self.config.poweroff_timeout,
-                elapsed_time: elapsed,
-                output,
-            });
         } else {
             self.qemu.kill().await.ok();
         }
@@ -135,5 +124,143 @@ impl<'a> BaseExecutor<'a> {
             connect: self.ssh.map(|_| ()),
             action_reports: self.reports,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::{qemu::Image, test_util::Env};
+
+    async fn run_executor(
+        config: &ExecutorConfig,
+        actions: Vec<(SshAction, Duration)>,
+    ) -> ExecutorReport {
+        let env = Env::read();
+
+        let image = env.base_path().join("image.qcow2");
+
+        env.builder()
+            .create(env.base_image(), Image::Qcow2(image.as_path()))
+            .await
+            .expect("failed to build the image");
+        let qemu = env
+            .spawner(1)
+            .spawn(image.into())
+            .await
+            .expect("failed to spawn the QEMU process");
+
+        let mut executor = BaseExecutor::new(qemu, config).await;
+
+        for (action, timeout) in actions {
+            executor.run(action, timeout).await.ok();
+        }
+
+        executor.finish().await
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn ssh_timeout() {
+        let config = ExecutorConfig {
+            user: "root".into(),
+            password: "root".into(),
+            connection_timeout: Duration::from_secs(1),
+            poweroff_timeout: Duration::from_secs(20),
+            poweroff_command: "/sbin/poweroff".into(),
+            output_limit: None,
+        };
+        let actions = vec![];
+
+        let report = time::timeout(Duration::from_secs(10), run_executor(&config, actions))
+            .await
+            .expect("timeout");
+
+        assert!(report.err().is_some());
+        assert!(report.connect().is_some());
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn faulty_command() {
+        let config = ExecutorConfig {
+            user: "root".into(),
+            password: "root".into(),
+            connection_timeout: Duration::from_secs(20),
+            poweroff_timeout: Duration::from_secs(20),
+            poweroff_command: "/sbin/poweroff".into(),
+            output_limit: None,
+        };
+        let actions = vec![(
+            SshAction::Exec {
+                cmd: "idonotexist".into(),
+            },
+            Duration::from_secs(2),
+        )];
+
+        let report = time::timeout(Duration::from_secs(60), run_executor(&config, actions))
+            .await
+            .expect("timeout");
+
+        assert!(report.err().is_some());
+        assert!(report.connect().is_none());
+        assert_eq!(report.action_reports().len(), 1);
+        assert!(report.action_reports()[0].err().is_some());
+        assert!(report.qemu().is_ok());
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn invalid_poweroff() {
+        let config = ExecutorConfig {
+            user: "root".into(),
+            password: "root".into(),
+            connection_timeout: Duration::from_secs(20),
+            poweroff_timeout: Duration::from_secs(20),
+            poweroff_command: "/i/do/not/work".into(),
+            output_limit: None,
+        };
+        let actions = vec![];
+
+        let report = time::timeout(Duration::from_secs(60), run_executor(&config, actions))
+            .await
+            .expect("timeout");
+
+        assert!(report.err().is_some());
+        assert!(report.connect().is_none());
+        assert!(report.qemu().is_err());
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn all_good() {
+        let config = ExecutorConfig {
+            user: "root".into(),
+            password: "root".into(),
+            connection_timeout: Duration::from_secs(20),
+            poweroff_timeout: Duration::from_secs(20),
+            poweroff_command: "/sbin/poweroff".into(),
+            output_limit: None,
+        };
+        let actions = vec![
+            (
+                SshAction::Exec { cmd: "pwd".into() },
+                Duration::from_secs(1),
+            ),
+            (SshAction::Exec { cmd: "ls".into() }, Duration::from_secs(1)),
+        ];
+
+        let report = time::timeout(Duration::from_secs(60), run_executor(&config, actions))
+            .await
+            .expect("timeout");
+
+        assert!(report.err().is_none());
+        assert!(report.connect().is_none());
+        assert_eq!(report.action_reports().len(), 2);
+        assert!(report
+            .action_reports()
+            .iter()
+            .all(|report| report.err().is_none()));
+        assert!(report.qemu().is_ok());
     }
 }

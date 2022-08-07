@@ -288,3 +288,111 @@ impl Tester {
         });
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::{patch_validator::PatchValidator, test_util::Env};
+    use std::mem;
+    use tokio::{sync::mpsc, time};
+
+    #[ignore]
+    #[tokio::test]
+    async fn tester() {
+        let env = Env::read();
+
+        let mut validator = PatchValidator::default();
+        let mut patches = vec![];
+        for i in 0..3 {
+            let name = format!("aa{}{}{}{}{}{}.patch", i, i, i, i, i, i);
+            let path = env.base_path().join(name);
+            fs::write(&path, format!("exit {}", i))
+                .await
+                .expect("failed to write file");
+            let patch = validator
+                .validate(&path)
+                .await
+                .expect("failed to validate patch");
+            patches.push(patch);
+        }
+
+        let artifacts_root = env.base_path().join("artifacts");
+        fs::create_dir(&artifacts_root)
+            .await
+            .expect("failed to make dir");
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let tester = Tester {
+            processor: Arc::new(PatchProcessor {
+                spawner: env.spawner(3),
+                builder: env.builder(),
+                base_image: env.base_image().path().into(),
+                run_config: RunConfig {
+                    execution: ExecutorConfig::test(),
+                    build: Scenario {
+                        retries: 0,
+                        steps: vec![vec![Step::TransferPatch {
+                            to: "patch".into(),
+                            mode: 0o777,
+                            timeout: Duration::from_secs(1),
+                        }]],
+                    },
+                    tests: [(
+                        "test".into(),
+                        Scenario {
+                            retries: 1,
+                            steps: vec![vec![Step::Action {
+                                action: SshAction::Exec {
+                                    cmd: "./patch".into(),
+                                },
+                                timeout: Duration::from_secs(1),
+                            }]],
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+            }),
+            artifacts_root,
+            reports_sink: tx,
+        };
+
+        for patch in patches {
+            tester.clone().schedule(patch).await;
+        }
+
+        mem::drop(tester);
+
+        let reports = time::timeout(Duration::from_secs(180), async move {
+            let mut reports = HashMap::new();
+            while let Some((patch, result)) = rx.recv().await {
+                reports.insert(patch.id().to_string(), result.expect("testing failed"));
+            }
+            reports
+        })
+        .await
+        .expect("timeout");
+
+        assert_eq!(reports.len(), 3);
+
+        let report_0 = reports.get("aa000000").expect("missing report");
+        let report_1 = reports.get("aa111111").expect("missing report");
+        let report_2 = reports.get("aa222222").expect("missing report");
+
+        for report in reports.values() {
+            assert!(report.build().err().is_none());
+            assert_eq!(report.tests().len(), 1);
+            assert!(report.tests().contains_key("test"));
+        }
+
+        assert!(report_0.tests().get("test").unwrap().err().is_none());
+        assert_eq!(report_0.tests().get("test").unwrap().attempts.len(), 1);
+
+        assert!(report_1.tests().get("test").unwrap().err().is_some());
+        assert_eq!(report_1.tests().get("test").unwrap().attempts.len(), 2);
+
+        assert!(report_2.tests().get("test").unwrap().err().is_some());
+        assert_eq!(report_2.tests().get("test").unwrap().attempts.len(), 2);
+    }
+}
