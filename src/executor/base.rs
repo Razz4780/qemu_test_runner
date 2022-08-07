@@ -85,54 +85,45 @@ impl<'a> BaseExecutor<'a> {
     }
 
     pub async fn finish(mut self) -> ExecutorReport {
-        let actions_ok = self
-            .reports
-            .last()
-            .map(|report| report.output.is_ok())
-            .unwrap_or(true);
+        if let Ok(ssh) = self.ssh.as_mut() {
+            let action = SshAction::Exec {
+                cmd: self.config.poweroff_command.clone(),
+            };
 
-        match (self.ssh.as_mut(), actions_ok) {
-            (Ok(ssh), true) => {
-                let action = SshAction::Exec {
-                    cmd: self.config.poweroff_command.clone(),
-                };
+            let start = Instant::now();
+            let res: Result<Result<(), io::Error>, Elapsed> =
+                time::timeout(self.config.poweroff_timeout, async {
+                    ssh.exec(action.clone()).await.ok();
 
-                let start = Instant::now();
-                let res: Result<Result<(), io::Error>, Elapsed> =
-                    time::timeout(self.config.poweroff_timeout, async {
-                        ssh.exec(action.clone()).await.ok();
-
-                        while self.qemu.try_wait()?.is_none() {
-                            time::sleep(Duration::from_millis(100)).await;
-                        }
-
-                        Ok(())
-                    })
-                    .await;
-                let elapsed = start.elapsed();
-
-                let output: Result<Output, Error> = match res {
-                    Ok(Ok(_)) => Ok(Output::default()),
-                    Ok(Err(error)) => {
-                        self.qemu.kill().await.ok();
-                        Err(error.into())
+                    while self.qemu.try_wait()?.is_none() {
+                        time::sleep(Duration::from_millis(100)).await;
                     }
-                    Err(error) => {
-                        self.qemu.kill().await.ok();
-                        Err(error.into())
-                    }
-                };
 
-                self.reports.push(ActionReport {
-                    action,
-                    timeout: self.config.poweroff_timeout,
-                    elapsed_time: elapsed,
-                    output,
+                    Ok(())
                 })
-            }
-            _ => {
-                self.qemu.kill().await.ok();
-            }
+                .await;
+            let elapsed = start.elapsed();
+
+            let output: Result<Output, Error> = match res {
+                Ok(Ok(_)) => Ok(Output::default()),
+                Ok(Err(error)) => {
+                    self.qemu.kill().await.ok();
+                    Err(error.into())
+                }
+                Err(error) => {
+                    self.qemu.kill().await.ok();
+                    Err(error.into())
+                }
+            };
+
+            self.reports.push(ActionReport {
+                action,
+                timeout: self.config.poweroff_timeout,
+                elapsed_time: elapsed,
+                output,
+            });
+        } else {
+            self.qemu.kill().await.ok();
         }
 
         let image = self.qemu.image_path().to_owned();
