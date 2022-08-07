@@ -1,10 +1,5 @@
-use serde::{ser::SerializeStruct, Serialize, Serializer};
-use std::{
-    fmt::{self, Debug, Display, Formatter},
-    io, process,
-};
-use tokio::time::error::Elapsed;
-
+use serde::{Serialize, Serializer};
+use std::io;
 pub mod config;
 pub mod executor;
 pub mod maybe_tmp;
@@ -15,94 +10,80 @@ pub mod stats;
 pub mod tasks;
 pub mod tester;
 
-/// An error that can occurr when executing a command.
-#[derive(Debug)]
-pub struct Error {
-    /// An empty error probably means that the child process was killed by a signal.
-    pub error: Option<io::Error>,
-    pub stdout: String,
-    pub stderr: String,
+#[derive(Serialize, Debug)]
+pub enum Output {
+    Finished {
+        #[serde(serialize_with = "serialize_exit_code")]
+        exit_code: Option<i32>,
+        #[serde(
+            skip_serializing_if = "Vec::is_empty",
+            serialize_with = "serialize_bytes_lossy"
+        )]
+        stdout: Vec<u8>,
+        #[serde(
+            skip_serializing_if = "Vec::is_empty",
+            serialize_with = "serialize_bytes_lossy"
+        )]
+        stderr: Vec<u8>,
+    },
+    Timeout,
+    Error {
+        #[serde(serialize_with = "serialize_io_error")]
+        error: io::Error,
+    },
 }
 
-impl Display for Error {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match &self.error {
-            Some(error) => write!(f, "{}", error),
-            None => f.write_str("process was killed by a signal"),
+impl Output {
+    pub fn success(&self) -> bool {
+        matches!(
+            self,
+            Self::Finished {
+                exit_code: Some(0),
+                ..
+            }
+        )
+    }
+
+    pub fn stdout(&self) -> Option<&[u8]> {
+        match self {
+            Self::Finished { stdout, .. } => Some(&stdout[..]),
+            Self::Timeout => None,
+            Self::Error { .. } => None,
+        }
+    }
+
+    pub fn stderr(&self) -> Option<&[u8]> {
+        match self {
+            Self::Finished { stderr, .. } => Some(&stderr[..]),
+            Self::Timeout => None,
+            Self::Error { .. } => None,
         }
     }
 }
 
-impl From<io::Error> for Error {
-    fn from(error: io::Error) -> Self {
-        Self {
-            error: Some(error),
-            stdout: Default::default(),
-            stderr: Default::default(),
-        }
+fn serialize_io_error<S>(error: &io::Error, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.collect_str(error)
+}
+
+fn serialize_exit_code<S>(code: &Option<i32>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match code {
+        Some(code) => serializer.serialize_i32(*code),
+        None => serializer.serialize_str("killed by a signal"),
     }
 }
 
-impl From<ssh2::Error> for Error {
-    fn from(error: ssh2::Error) -> Self {
-        io::Error::from(error).into()
-    }
-}
-
-impl From<Elapsed> for Error {
-    fn from(_: Elapsed) -> Self {
-        Self {
-            error: Some(io::ErrorKind::TimedOut.into()),
-            stdout: Default::default(),
-            stderr: Default::default(),
-        }
-    }
-}
-
-impl<'a> From<&'a mut Error> for &'a Error {
-    fn from(error: &'a mut Error) -> Self {
-        error
-    }
-}
-
-impl Serialize for Error {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut s = serializer.serialize_struct("Error", 3)?;
-        s.serialize_field("error", &format!("{}", self))?;
-        s.serialize_field("stdout", &self.stdout)?;
-        s.serialize_field("stderr", &self.stderr)?;
-        s.end()
-    }
-}
-
-/// An output of a successful command.
-#[derive(Default, Debug, Serialize)]
-pub struct Output {
-    pub stdout: String,
-    pub stderr: String,
-}
-
-impl TryFrom<process::Output> for Output {
-    type Error = Error;
-
-    fn try_from(output: process::Output) -> Result<Self, Self::Error> {
-        if output.status.success() {
-            Ok(Self {
-                stdout: String::from_utf8_lossy(&output.stdout[..]).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr[..]).into_owned(),
-            })
-        } else {
-            let error = output.status.code().map(io::Error::from_raw_os_error);
-            Err(Error {
-                error,
-                stdout: String::from_utf8_lossy(&output.stdout[..]).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr[..]).into_owned(),
-            })
-        }
-    }
+fn serialize_bytes_lossy<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let as_str = String::from_utf8_lossy(bytes);
+    serializer.serialize_str(&as_str)
 }
 
 #[cfg(test)]

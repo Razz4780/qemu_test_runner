@@ -1,4 +1,3 @@
-use crate::{Error, Output};
 use std::{
     ffi::{OsStr, OsString},
     io,
@@ -49,7 +48,7 @@ pub struct ImageBuilder {
 
 impl ImageBuilder {
     /// Creates a new image located at `dst` and backed by `src`.
-    pub async fn create(&self, src: Image<'_>, dst: Image<'_>) -> Result<Output, Error> {
+    pub async fn create(&self, src: Image<'_>, dst: Image<'_>) -> io::Result<()> {
         Command::new(&self.cmd)
             .arg("create")
             .arg("-f")
@@ -60,8 +59,9 @@ impl ImageBuilder {
             .arg(src.format())
             .arg(dst.path())
             .output()
-            .await?
-            .try_into()
+            .await?;
+
+        Ok(())
     }
 }
 
@@ -159,14 +159,19 @@ impl QemuInstance {
         self.child.as_mut().unwrap().kill().await
     }
 
-    /// Waits for the wrapped [Child]'s [Output].
-    pub async fn wait(mut self) -> Result<Output, Error> {
-        self.child
-            .take()
-            .unwrap()
-            .wait_with_output()
-            .await?
-            .try_into()
+    /// Waits for the wrapped [Child].
+    pub async fn wait(mut self) -> io::Result<()> {
+        let output = self.child.take().unwrap().wait_with_output().await?;
+        if output.status.success() {
+            Ok(())
+        } else if let Some(code) = output.status.code() {
+            Err(io::Error::from_raw_os_error(code))
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "process killed by a signal",
+            ))
+        }
     }
 
     /// Checks whether the wrapped [Child] has exited.
@@ -260,7 +265,7 @@ impl QemuSpawner {
     /// Spawns a new QEMU instance.
     /// The instance will use the image under the given `image_path`.
     /// This method will wait if there are too many running QEMU processes spawned with this instance.
-    pub async fn spawn(&self, image_path: OsString) -> Result<QemuInstance, Error> {
+    pub async fn spawn(&self, image_path: OsString) -> io::Result<QemuInstance> {
         let permit = self
             .permits
             .clone()

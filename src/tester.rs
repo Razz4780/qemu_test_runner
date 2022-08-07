@@ -3,7 +3,6 @@ use crate::{
     patch_validator::Patch,
     qemu::{Image, ImageBuilder, QemuSpawner},
     ssh::SshAction,
-    Error,
 };
 use serde::Serialize;
 use std::{
@@ -80,15 +79,11 @@ impl ScenarioReport {
         self.images.last().map(AsRef::as_ref)
     }
 
-    pub fn err(&self) -> Option<&Error> {
-        self.attempts.last()?.last()?.err()
-    }
-
-    pub fn runs(&self) -> impl Iterator<Item = (&[ExecutorReport], &Path)> {
+    pub fn success(&self) -> bool {
         self.attempts
-            .iter()
-            .map(Vec::as_slice)
-            .zip(self.images.iter().map(PathBuf::as_path))
+            .last()
+            .map(|reports| reports.iter().all(ExecutorReport::success))
+            .unwrap_or(true)
     }
 }
 
@@ -118,7 +113,7 @@ async fn prepare_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-type TestWorker = JoinHandle<Result<(String, ScenarioReport), Error>>;
+type TestWorker = JoinHandle<io::Result<(String, ScenarioReport)>>;
 
 pub struct PatchProcessor {
     pub spawner: QemuSpawner,
@@ -134,7 +129,7 @@ impl PatchProcessor {
         base_image: Image<'_>,
         artifacts: &Path,
         scenario: &Scenario,
-    ) -> Result<ScenarioReport, Error> {
+    ) -> io::Result<ScenarioReport> {
         let mut report = ScenarioReport::default();
 
         for i in 0..=scenario.retries {
@@ -151,8 +146,8 @@ impl PatchProcessor {
                     .iter()
                     .map(|step| (step.action(patch), step.timeout()));
 
-                let error = executor.open_stack().await?.consume(iter).await.is_err();
-                if error {
+                let success = executor.open_stack().await?.run_until_failure(iter).await?;
+                if !success {
                     break;
                 }
             }
@@ -160,7 +155,7 @@ impl PatchProcessor {
             let attempt = executor.finish();
             report.push_attempt(dst, attempt);
 
-            if report.err().is_none() {
+            if report.success() {
                 break;
             }
         }
@@ -168,7 +163,7 @@ impl PatchProcessor {
         Ok(report)
     }
 
-    async fn build(&self, patch: &Path, artifacts_root: &Path) -> Result<ScenarioReport, Error> {
+    async fn build(&self, patch: &Path, artifacts_root: &Path) -> io::Result<ScenarioReport> {
         let build_dir = artifacts_root.join("build");
         prepare_dir(&build_dir).await?;
 
@@ -186,7 +181,7 @@ impl PatchProcessor {
         patch: &Path,
         artifacts_root: &Path,
         built_image: Option<&Path>,
-    ) -> Result<Vec<TestWorker>, Error> {
+    ) -> io::Result<Vec<TestWorker>> {
         let tests_dir = artifacts_root.join("tests");
         prepare_dir(&tests_dir).await?;
 
@@ -231,12 +226,12 @@ impl PatchProcessor {
         self: Arc<Self>,
         patch: &Path,
         artifacts_root: &Path,
-    ) -> Result<RunReport, Error> {
+    ) -> io::Result<RunReport> {
         let mut res = RunReport {
             build: self.build(patch, artifacts_root).await?,
             tests: Default::default(),
         };
-        if res.build.err().is_some() {
+        if !res.build.success() {
             return Ok(res);
         }
 
@@ -257,7 +252,7 @@ impl PatchProcessor {
                 Err(error) => {
                     handles.iter().for_each(JoinHandle::abort);
 
-                    return Err(io::Error::new(io::ErrorKind::Other, error).into());
+                    return Err(io::Error::new(io::ErrorKind::Other, error));
                 }
             }
         }
@@ -270,7 +265,7 @@ impl PatchProcessor {
 pub struct Tester {
     pub processor: Arc<PatchProcessor>,
     pub artifacts_root: PathBuf,
-    pub reports_sink: UnboundedSender<(Patch, Result<RunReport, Error>)>,
+    pub reports_sink: UnboundedSender<(Patch, io::Result<RunReport>)>,
 }
 
 impl Tester {
@@ -279,7 +274,7 @@ impl Tester {
 
         task::spawn(async move {
             let res = if let Err(e) = prepare_dir(&artifacts).await {
-                Err(e.into())
+                Err(e)
             } else {
                 self.processor.process(patch.path(), &artifacts).await
             };
@@ -381,18 +376,18 @@ mod test {
         let report_2 = reports.get("aa222222").expect("missing report");
 
         for report in reports.values() {
-            assert!(report.build().err().is_none());
+            assert!(report.build().success());
             assert_eq!(report.tests().len(), 1);
             assert!(report.tests().contains_key("test"));
         }
 
-        assert!(report_0.tests().get("test").unwrap().err().is_none());
+        assert!(report_0.tests().get("test").unwrap().success());
         assert_eq!(report_0.tests().get("test").unwrap().attempts.len(), 1);
 
-        assert!(report_1.tests().get("test").unwrap().err().is_some());
+        assert!(!report_1.tests().get("test").unwrap().success());
         assert_eq!(report_1.tests().get("test").unwrap().attempts.len(), 2);
 
-        assert!(report_2.tests().get("test").unwrap().err().is_some());
+        assert!(!report_2.tests().get("test").unwrap().success());
         assert_eq!(report_2.tests().get("test").unwrap().attempts.len(), 2);
     }
 }
