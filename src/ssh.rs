@@ -8,6 +8,7 @@ use std::{
     io::{self, Read},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -147,21 +148,27 @@ impl SshHandle {
         password: String,
         output_limit: Option<u64>,
     ) -> io::Result<Self> {
-        let session = task::spawn_blocking(move || loop {
-            let res = SshWorker::open_session(addr, &username, &password);
-            if let Ok(session) = res {
-                break session;
-            }
+        let session = {
+            let guard = Arc::new(());
+            let weak = Arc::downgrade(&guard);
+            task::spawn_blocking(move || {
+                while weak.strong_count() > 0 {
+                    if let Ok(session) = SshWorker::open_session(addr, &username, &password) {
+                        return session;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
 
-            thread::sleep(Duration::from_millis(100));
-        })
-        .await
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("failed to open an SSH connection: {}", e),
-            )
-        })?;
+                panic!("task cancelled");
+            })
+            .await
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("failed to open an SSH connection: {}", e),
+                )
+            })?
+        };
 
         let (tx, rx) = mpsc::channel(1);
 
