@@ -232,10 +232,8 @@ impl PatchProcessor {
         patch: &Path,
         artifacts_root: &Path,
     ) -> Result<RunReport, Error> {
-        let artifacts_root = artifacts_root.canonicalize()?;
-
         let mut res = RunReport {
-            build: self.build(patch, &artifacts_root).await?,
+            build: self.build(patch, artifacts_root).await?,
             tests: Default::default(),
         };
         if res.build.err().is_some() {
@@ -243,7 +241,7 @@ impl PatchProcessor {
         }
 
         let mut handles = self
-            .spawn_test_workers(patch, &artifacts_root, res.build.last_image())
+            .spawn_test_workers(patch, artifacts_root, res.build.last_image())
             .await?;
 
         while let Some(handle) = handles.pop() {
@@ -259,11 +257,7 @@ impl PatchProcessor {
                 Err(error) => {
                     handles.iter().for_each(JoinHandle::abort);
 
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("failed to run test: {}", error),
-                    )
-                    .into());
+                    return Err(io::Error::new(io::ErrorKind::Other, error).into());
                 }
             }
         }
@@ -280,15 +274,17 @@ pub struct Tester {
 }
 
 impl Tester {
-    pub async fn schedule(self, patch: Patch) -> io::Result<()> {
+    pub async fn schedule(self, patch: Patch) {
         let artifacts = self.artifacts_root.join(patch.id());
-        prepare_dir(&artifacts).await?;
 
         task::spawn(async move {
-            let res = self.processor.process(patch.path(), &artifacts).await;
-            self.reports_sink.send((patch, res))
-        });
+            let res = if let Err(e) = prepare_dir(&artifacts).await {
+                Err(e.into())
+            } else {
+                self.processor.process(patch.path(), &artifacts).await
+            };
 
-        Ok(())
+            self.reports_sink.send((patch, res)).ok();
+        });
     }
 }

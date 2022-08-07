@@ -16,9 +16,7 @@ pub struct TesterTask {
 impl TesterTask {
     pub async fn run(mut self) {
         while let Some(patch) = self.patch_source.recv().await {
-            if let Err(e) = self.tester.clone().schedule(patch).await {
-                eprintln!("an error occurred: {}", e);
-            }
+            self.tester.clone().schedule(patch).await;
         }
     }
 }

@@ -11,6 +11,7 @@ pub mod maybe_tmp;
 pub mod patch_validator;
 pub mod qemu;
 pub mod ssh;
+pub mod stats;
 pub mod tasks;
 pub mod tester;
 
