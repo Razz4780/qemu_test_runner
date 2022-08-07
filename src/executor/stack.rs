@@ -75,6 +75,8 @@ impl<'a> Stack<'a> {
 
 #[cfg(test)]
 mod test {
+    use tokio::time;
+
     use super::*;
     use crate::{qemu::Image, test_util::Env};
 
@@ -100,75 +102,79 @@ mod test {
             output_limit: None,
         };
 
-        let mut executor = StackExecutor::new(&config, &spawner, image.as_os_str());
+        let reports = time::timeout(Duration::from_secs(180), async {
+            let mut executor = StackExecutor::new(&config, &spawner, image.as_os_str());
 
-        let mut stack = executor.open_stack().await.expect("failed to open_stack");
-        stack
-            .run(
-                SshAction::Exec {
-                    cmd: "touch file1".into(),
-                },
-                Duration::from_secs(1),
-            )
-            .await
-            .expect("touch failed");
-        stack.finish().await.expect("poweroff failed");
+            let mut stack = executor.open_stack().await.expect("failed to open_stack");
+            stack
+                .run(
+                    SshAction::Exec {
+                        cmd: "touch file1".into(),
+                    },
+                    Duration::from_secs(1),
+                )
+                .await
+                .expect("touch failed");
+            stack.finish().await.expect("poweroff failed");
 
-        let mut stack = executor.open_stack().await.expect("failed to open_stack");
-        stack
-            .run(
-                SshAction::Exec {
-                    cmd: "cat file1".into(),
-                },
-                Duration::from_secs(1),
-            )
-            .await
-            .expect("cat failed");
-        stack
-            .run(
-                SshAction::Exec {
-                    cmd: "rm file1".into(),
-                },
-                Duration::from_secs(1),
-            )
-            .await
-            .expect("rm failed");
-        stack
-            .run(
-                SshAction::Exec {
-                    cmd: "touch file2".into(),
-                },
-                Duration::from_secs(1),
-            )
-            .await
-            .expect("touch failed");
-        stack.finish().await.expect("poweroff failed");
+            let mut stack = executor.open_stack().await.expect("failed to open_stack");
+            stack
+                .run(
+                    SshAction::Exec {
+                        cmd: "cat file1".into(),
+                    },
+                    Duration::from_secs(1),
+                )
+                .await
+                .expect("cat failed");
+            stack
+                .run(
+                    SshAction::Exec {
+                        cmd: "rm file1".into(),
+                    },
+                    Duration::from_secs(1),
+                )
+                .await
+                .expect("rm failed");
+            stack
+                .run(
+                    SshAction::Exec {
+                        cmd: "touch file2".into(),
+                    },
+                    Duration::from_secs(1),
+                )
+                .await
+                .expect("touch failed");
+            stack.finish().await.expect("poweroff failed");
 
-        let mut stack = executor.open_stack().await.expect("failed to open_stack");
-        stack
-            .run(
-                SshAction::Exec {
-                    cmd: "cat file2".into(),
-                },
-                Duration::from_secs(1),
-            )
-            .await
-            .expect("cat failed");
-        stack.finish().await.expect("poweroff failed");
+            let mut stack = executor.open_stack().await.expect("failed to open_stack");
+            stack
+                .run(
+                    SshAction::Exec {
+                        cmd: "cat file2".into(),
+                    },
+                    Duration::from_secs(1),
+                )
+                .await
+                .expect("cat failed");
+            stack.finish().await.expect("poweroff failed");
 
-        let mut stack = executor.open_stack().await.expect("failed to open_stack");
-        stack
-            .run(
-                SshAction::Exec {
-                    cmd: "cat file3".into(),
-                },
-                Duration::from_secs(1),
-            )
-            .await
-            .expect_err("cat did not fail");
-        stack.finish().await.expect_err("poweroff failed");
+            let mut stack = executor.open_stack().await.expect("failed to open_stack");
+            stack
+                .run(
+                    SshAction::Exec {
+                        cmd: "cat file3".into(),
+                    },
+                    Duration::from_secs(1),
+                )
+                .await
+                .expect_err("cat did not fail");
+            stack.finish().await.expect_err("poweroff failed");
 
-        let reports = executor.finish();
+            executor.finish()
+        })
+        .await
+        .expect("timeout");
 
         assert_eq!(reports.len(), 4);
         assert!(reports[0].err().is_none());

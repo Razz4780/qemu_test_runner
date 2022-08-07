@@ -26,14 +26,14 @@ pub enum Image<'a> {
 }
 
 impl<'a> Image<'a> {
-    fn path(self) -> &'a Path {
+    pub fn path(self) -> &'a Path {
         match self {
             Self::Qcow2(p) => p,
             Self::Raw(p) => p,
         }
     }
 
-    fn format(self) -> &'static OsStr {
+    pub fn format(self) -> &'static OsStr {
         match self {
             Self::Qcow2(_) => "qcow2".as_ref(),
             Self::Raw(_) => "raw".as_ref(),
