@@ -72,7 +72,12 @@ impl ExecutorReport {
         self.connect
             .as_ref()
             .err()
-            .or_else(|| self.action_reports.last().and_then(ActionReport::err))
+            .or_else(|| {
+                self.action_reports
+                    .iter()
+                    .filter_map(ActionReport::err)
+                    .next()
+            })
             .or_else(|| self.qemu.as_ref().err())
     }
 }

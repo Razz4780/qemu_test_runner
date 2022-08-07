@@ -72,3 +72,108 @@ impl<'a> Stack<'a> {
         self.finish().await
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::{qemu::Image, test_util::Env};
+
+    #[ignore]
+    #[tokio::test]
+    async fn persistent_changes() {
+        let env = Env::read();
+
+        let image = env.base_path().join("image.qcow2");
+
+        env.builder()
+            .create(env.base_image(), Image::Qcow2(image.as_path()))
+            .await
+            .expect("failed to build the image");
+        let spawner = env.spawner(1);
+
+        let config = ExecutorConfig {
+            user: "root".into(),
+            password: "root".into(),
+            connection_timeout: Duration::from_secs(20),
+            poweroff_timeout: Duration::from_secs(20),
+            poweroff_command: "/sbin/poweroff".into(),
+            output_limit: None,
+        };
+
+        let mut executor = StackExecutor::new(&config, &spawner, image.as_os_str());
+
+        let mut stack = executor.open_stack().await.expect("failed to open_stack");
+        stack
+            .run(
+                SshAction::Exec {
+                    cmd: "touch file1".into(),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("touch failed");
+        stack.finish().await.expect("poweroff failed");
+
+        let mut stack = executor.open_stack().await.expect("failed to open_stack");
+        stack
+            .run(
+                SshAction::Exec {
+                    cmd: "cat file1".into(),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("cat failed");
+        stack
+            .run(
+                SshAction::Exec {
+                    cmd: "rm file1".into(),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("rm failed");
+        stack
+            .run(
+                SshAction::Exec {
+                    cmd: "touch file2".into(),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("touch failed");
+        stack.finish().await.expect("poweroff failed");
+
+        let mut stack = executor.open_stack().await.expect("failed to open_stack");
+        stack
+            .run(
+                SshAction::Exec {
+                    cmd: "cat file2".into(),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("cat failed");
+        stack.finish().await.expect("poweroff failed");
+
+        let mut stack = executor.open_stack().await.expect("failed to open_stack");
+        stack
+            .run(
+                SshAction::Exec {
+                    cmd: "cat file3".into(),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .expect_err("cat did not fail");
+        stack.finish().await.expect_err("poweroff failed");
+
+        let reports = executor.finish();
+
+        assert_eq!(reports.len(), 4);
+        assert!(reports[0].err().is_none());
+        assert!(reports[1].err().is_none());
+        assert!(reports[2].err().is_none());
+        assert!(reports[3].err().is_some());
+    }
+}
