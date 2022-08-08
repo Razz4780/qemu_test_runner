@@ -1,6 +1,7 @@
 use crate::Output;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::Serializer;
 use ssh2::Session;
 use std::{
     fmt::Display,
@@ -33,8 +34,17 @@ pub enum SshAction {
         /// Path to the destination on the remote machine.
         to: PathBuf,
         /// UNIX permissions of the destination file.
+        #[serde(serialize_with = "serialize_i32_octal")]
         mode: i32,
     },
+}
+
+fn serialize_i32_octal<S>(val: &i32, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let as_string = format!("0o{:o}", val);
+    serializer.serialize_str(&as_string)
 }
 
 struct Work(SshAction, oneshot::Sender<Output>);
@@ -147,17 +157,18 @@ impl SshHandle {
         output_limit: Option<u64>,
     ) -> io::Result<Self> {
         let session = {
+            log::debug!("Establishing an SSH connection to {}.", addr);
             let guard = Arc::new(());
             let weak = Arc::downgrade(&guard);
             task::spawn_blocking(move || {
                 while weak.strong_count() > 0 {
                     if let Ok(session) = SshWorker::open_session(addr, &username, &password) {
-                        return session;
+                        return Some(session);
                     }
                     thread::sleep(Duration::from_millis(100));
                 }
 
-                panic!("task cancelled");
+                None
             })
             .await
             .map_err(|e| {
@@ -166,6 +177,7 @@ impl SshHandle {
                     format!("failed to open an SSH connection: {}", e),
                 )
             })?
+            .expect("task was not cancelled")
         };
 
         let (tx, rx) = mpsc::channel(1);
@@ -175,6 +187,7 @@ impl SshHandle {
             receiver: rx,
             output_limit,
         };
+        log::debug!("Spawning a background SSH worker for address {}.", addr);
         task::spawn_blocking(move || worker.run());
 
         Ok(Self { sender: tx })

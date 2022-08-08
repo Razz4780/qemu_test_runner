@@ -127,7 +127,7 @@ impl MonitorHandle {
 
         Err(io::Error::new(
             io::ErrorKind::Other,
-            "no SSH port forward in network info received from the QEMU monitor",
+            "no SSH port forward found in network info received from the QEMU monitor",
         ))
     }
 }
@@ -165,8 +165,17 @@ impl QemuInstance {
         if output.status.success() {
             Ok(())
         } else if let Some(code) = output.status.code() {
+            log::warn!(
+                "QEMU process running image {} unexpectedly ended with error code {}.",
+                self.image_path.to_string_lossy(),
+                code
+            );
             Err(io::Error::from_raw_os_error(code))
         } else {
+            log::warn!(
+                "QEMU process runnning image {} was unexpectedly killed by a signal.",
+                self.image_path.to_string_lossy()
+            );
             Err(io::Error::new(
                 io::ErrorKind::Other,
                 "process killed by a signal",
@@ -266,6 +275,10 @@ impl QemuSpawner {
     /// The instance will use the image under the given `image_path`.
     /// This method will wait if there are too many running QEMU processes spawned with this instance.
     pub async fn spawn(&self, image_path: OsString) -> io::Result<QemuInstance> {
+        log::debug!(
+            "Awaiting for a permission to spawn a QEMU process on image {}.",
+            image_path.to_string_lossy()
+        );
         let permit = self
             .permits
             .clone()
@@ -275,6 +288,11 @@ impl QemuSpawner {
 
         let monitor = MonitorHandle::new()?;
         let socket = monitor.socket();
+
+        log::debug!(
+            "Spawning a QEMU process on image {}.",
+            image_path.to_string_lossy()
+        );
         let child = self.setup_cmd(&image_path, socket.as_os_str()).spawn()?;
 
         Ok(QemuInstance {

@@ -48,6 +48,13 @@ impl<'a> BaseExecutor<'a> {
         .await
         .ok();
 
+        if ssh.is_some() {
+            log::debug!(
+                "Established an SSH connection to a QEMU instance running image: {}.",
+                qemu.image_path().to_string_lossy()
+            );
+        }
+
         Self {
             qemu,
             config,
@@ -73,12 +80,18 @@ impl<'a> BaseExecutor<'a> {
         };
         let success = output.success();
 
-        self.reports.push(ActionReport {
+        let report = ActionReport {
             action,
             timeout_ms: timeout.as_millis(),
             elapsed_time_ms: elapsed_time.as_millis(),
             output,
-        });
+        };
+        log::debug!(
+            "Executed an action {:?} on a QEMU instance running image {}.",
+            report,
+            self.qemu.image_path().to_string_lossy()
+        );
+        self.reports.push(report);
 
         Ok(success)
     }
@@ -88,6 +101,11 @@ impl<'a> BaseExecutor<'a> {
 
         let (ssh_ok, exit_ok) = match self.ssh.as_mut() {
             Some(ssh) => {
+                log::debug!(
+                    "Executing a poweroff command '{}' on a QEMU instance running image {}.",
+                    self.config.poweroff_command,
+                    image.to_string_lossy()
+                );
                 let action = SshAction::Exec {
                     cmd: self.config.poweroff_command.clone(),
                 };
@@ -106,11 +124,16 @@ impl<'a> BaseExecutor<'a> {
 
                 match res {
                     Ok(Ok(_)) => {
+                        log::debug!(
+                            "QEMU process running image {} exited on time.",
+                            image.to_string_lossy()
+                        );
                         self.qemu.wait().await?;
                         (true, true)
                     }
                     Ok(Err(error)) => return Err(error),
                     Err(_) => {
+                        log::debug!("QEMU process running image {} did not exit on time, killing the process.", image.to_string_lossy());
                         self.qemu.kill().await.ok();
                         self.qemu.wait().await.ok();
                         (true, false)

@@ -61,7 +61,8 @@ async fn make_patch_processor(args: Args) -> PatchProcessor {
         let config = Config::from_file(&args.suite)
             .await
             .expect("failed to process the config file");
-        config.try_into().expect("invalid suite configuration")
+        log::debug!("Successfuly parsed the suite file: {:?}", config);
+        config.into()
     };
 
     let qemu_config = QemuConfig {
@@ -120,59 +121,63 @@ async fn consume_results(
     while let Some((patch, result)) = rx.recv().await {
         stats.update(patch.path(), &result);
 
-        if let Ok(report) = &result {
-            print_result(&patch, report);
+        match result {
+            Ok(report) => {
+                print_result(&patch, &report);
 
-            if let Some(path) = reports_dir.as_ref() {
-                if let Err(error) = save_report(path, &patch, report).await {
-                    eprintln!(
-                        "Failed to save the report for the patch {}, error: {:?}",
-                        patch.path().display(),
-                        error
-                    );
+                if let Some(path) = reports_dir.as_ref() {
+                    if let Err(error) = save_report(path, &patch, &report).await {
+                        log::error!(
+                            "Failed to save the report for the patch {}. Error: {:?}.",
+                            patch.path().display(),
+                            error
+                        );
+                    }
                 }
+            }
+            Err(error) => {
+                log::error!(
+                    "Test run of solution {} failed. Error: {}.",
+                    patch.id(),
+                    error
+                );
             }
         }
     }
 
     if let Some(path) = reports_dir {
-        eprintln!("Detailed reports saved in {}", path.display());
+        log::info!("Detailed reports saved in {}.", path.display());
     }
 
     stats
 }
 
 fn print_stats(stats: &Stats) {
-    eprintln!(
-        "{} solution(s) processed successfuly",
+    log::info!(
+        "{} solution(s) processed successfuly.",
         stats.solutions() - stats.internal_errors().len()
     );
     if !stats.internal_errors().is_empty() {
-        eprintln!(
-            "{} solution(s) not processed due to internal errors",
-            stats.internal_errors().len()
+        log::error!(
+            "{} solution(s) not processed due to internal errors: {:?}.",
+            stats.internal_errors().len(),
+            stats.internal_errors(),
         );
-        for path in stats.internal_errors() {
-            eprintln!("  - {}", path.display());
-        }
     }
-    eprintln!("{} solution(s) did not build", stats.builds_failed());
+    log::info!("{} solution(s) did not build.", stats.builds_failed());
     if !stats.test_failures().is_empty() {
-        eprintln!("Tests by failures count:");
         let mut tests_with_failures = stats
             .test_failures()
             .iter()
             .map(|(test, failures)| (&test[..], *failures))
             .collect::<Vec<_>>();
         tests_with_failures.sort_unstable_by_key(|(_, failures)| *failures);
-        for (test, failures) in tests_with_failures.into_iter().rev() {
-            eprintln!("  - {}: {}", test, failures);
-        }
+        log::info!("Tests by failures count: {:?}.", tests_with_failures);
     }
 
     if stats.failed_report_saves() > 0 {
-        eprintln!(
-            "Failed to save {} detailed reports",
+        log::error!(
+            "Failed to save {} detailed reports.",
             stats.failed_report_saves()
         );
     }
@@ -180,15 +185,28 @@ fn print_stats(stats: &Stats) {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    env_logger::init();
+
     let args = Args::parse();
+    log::debug!("Program is running with args: {:?}.", args);
 
     let artifacts = match args.artifacts.as_ref() {
         Some(path) => MaybeTmp::at_path(path)
             .await
             .expect("failed to access the artifacts directory"),
-        None => MaybeTmp::tmp().expect("failed to create a temporary directory"),
+        None => {
+            let tmp = MaybeTmp::tmp().expect("failed to create a temporary directory");
+            log::info!(
+                "Artifacts direcrory was not specified, artifacts will be stored in {}.",
+                tmp.path().display()
+            );
+            tmp
+        }
     };
     let reports_dir = args.reports.clone();
+    if reports_dir.is_none() {
+        log::info!("Reports directory was not specified, reports will not be stored.");
+    }
 
     let (tester_tx, tester_rx) = mpsc::unbounded_channel();
     let (input_tx, input_rx) = mpsc::unbounded_channel();
@@ -213,14 +231,28 @@ async fn main() -> ExitCode {
 
     let stats = consume_results(tester_rx, reports_dir.as_deref()).await;
 
-    let task_error = tokio::try_join!(tester_task, input_task).err();
-    if let Some(e) = task_error.as_ref() {
-        eprintln!("An internal task panicked with error: {}", e);
-        eprintln!("Finishing early");
+    let invalid_input_lines = input_task.await;
+    let tester_result = tester_task.await;
+
+    let task_error = invalid_input_lines
+        .as_ref()
+        .err()
+        .or_else(|| tester_result.as_ref().err());
+
+    if let Some(e) = task_error {
+        log::error!(
+            "An internal task panicked with error: {}. Finishing early.",
+            e
+        );
     } else {
-        eprintln!("Finished");
+        log::info!("Finished.");
     }
 
+    if let Ok(invalid) = invalid_input_lines {
+        if invalid > 0 {
+            log::warn!("{} invalid line(s) of input ignored.", invalid);
+        }
+    }
     print_stats(&stats);
 
     if task_error.is_none()

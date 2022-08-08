@@ -9,6 +9,7 @@ pub mod base;
 pub mod stack;
 
 /// Config for running a sequence of actions on a [crate::qemu::QemuInstance].
+#[derive(Debug)]
 pub struct ExecutorConfig {
     /// The user to executing actions.
     pub user: String,
