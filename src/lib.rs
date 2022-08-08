@@ -11,10 +11,10 @@ pub mod tasks;
 pub mod tester;
 
 #[derive(Serialize, Debug)]
+#[serde(tag = "result", rename_all = "snake_case")]
 pub enum Output {
     Finished {
-        #[serde(serialize_with = "serialize_exit_code")]
-        exit_code: Option<i32>,
+        exit_code: i32,
         #[serde(
             skip_serializing_if = "Vec::is_empty",
             serialize_with = "serialize_bytes_lossy"
@@ -35,13 +35,7 @@ pub enum Output {
 
 impl Output {
     pub fn success(&self) -> bool {
-        matches!(
-            self,
-            Self::Finished {
-                exit_code: Some(0),
-                ..
-            }
-        )
+        matches!(self, Self::Finished { exit_code: 0, .. })
     }
 
     pub fn stdout(&self) -> Option<&[u8]> {
@@ -66,16 +60,6 @@ where
     S: Serializer,
 {
     serializer.collect_str(error)
-}
-
-fn serialize_exit_code<S>(code: &Option<i32>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match code {
-        Some(code) => serializer.serialize_i32(*code),
-        None => serializer.serialize_str("killed by a signal"),
-    }
 }
 
 fn serialize_bytes_lossy<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>

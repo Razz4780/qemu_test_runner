@@ -19,6 +19,7 @@ use tokio::{
 
 /// A command that can be executed by the [SshHandle].
 #[derive(Debug, Deserialize, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum SshAction {
     /// Executing a command on the remote machine.
     Exec {
@@ -70,7 +71,7 @@ impl SshWorker {
                 SshAction::Exec { cmd } => self.exec(&cmd),
                 SshAction::Send { from, to, mode } => {
                     self.send(&from, &to, mode).map(|_| Output::Finished {
-                        exit_code: Some(0),
+                        exit_code: 0,
                         stdout: Default::default(),
                         stderr: Default::default(),
                     })
@@ -105,10 +106,10 @@ impl SshWorker {
         };
 
         channel.wait_close()?;
-        let exit_status = channel.exit_status()?;
+        let exit_code = channel.exit_status()?;
 
         Ok(Output::Finished {
-            exit_code: Some(exit_status),
+            exit_code,
             stdout,
             stderr,
         })

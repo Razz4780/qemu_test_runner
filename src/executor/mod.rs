@@ -1,7 +1,7 @@
 use crate::{ssh::SshAction, Output};
 use serde::Serialize;
 use std::{
-    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -26,10 +26,10 @@ pub struct ExecutorConfig {
 
 #[derive(Debug, Serialize)]
 pub struct ActionReport {
-    pub action: SshAction,
-    pub timeout: Duration,
-    pub elapsed_time: Duration,
-    pub output: Output,
+    action: SshAction,
+    timeout_ms: u128,
+    elapsed_time_ms: u128,
+    output: Output,
 }
 
 impl ActionReport {
@@ -42,7 +42,7 @@ impl ActionReport {
 #[derive(Debug, Serialize)]
 pub struct ExecutorReport {
     /// Path to the image used by the [crate::qemu::QemuInstance].
-    image: OsString,
+    image: PathBuf,
     /// Whether the SSH connection was established before timeout.
     ssh_ok: bool,
     /// Reports from the executed [SshAction]s.
@@ -52,7 +52,7 @@ pub struct ExecutorReport {
 }
 
 impl ExecutorReport {
-    pub fn image(&self) -> &OsStr {
+    pub fn image(&self) -> &Path {
         &self.image
     }
 
