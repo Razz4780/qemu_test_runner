@@ -75,8 +75,8 @@ impl<'a> BaseExecutor<'a> {
 
         self.reports.push(ActionReport {
             action,
-            timeout,
-            elapsed_time,
+            timeout_ms: timeout.as_millis(),
+            elapsed_time_ms: elapsed_time.as_millis(),
             output,
         });
 
@@ -125,7 +125,7 @@ impl<'a> BaseExecutor<'a> {
         };
 
         Ok(ExecutorReport {
-            image,
+            image: image.into(),
             ssh_ok,
             action_reports: self.reports,
             exit_ok,
