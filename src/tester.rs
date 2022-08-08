@@ -51,12 +51,13 @@ impl Step {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Scenario {
     pub retries: usize,
     pub steps: Vec<Vec<Step>>,
 }
 
+#[derive(Debug)]
 pub struct RunConfig {
     pub execution: ExecutorConfig,
     pub build: Scenario,
@@ -227,14 +228,17 @@ impl PatchProcessor {
         patch: &Path,
         artifacts_root: &Path,
     ) -> io::Result<RunReport> {
+        log::info!("Building a test image for patch at {}.", patch.display());
         let mut res = RunReport {
             build: self.build(patch, artifacts_root).await?,
             tests: Default::default(),
         };
         if !res.build.success() {
+            log::info!("Build process failed for patch {}.", patch.display());
             return Ok(res);
         }
 
+        log::info!("Spawning test workers for patch {}.", patch.display());
         let mut handles = self
             .spawn_test_workers(patch, artifacts_root, res.build.last_image())
             .await?;
@@ -242,14 +246,29 @@ impl PatchProcessor {
         while let Some(handle) = handles.pop() {
             match handle.await {
                 Ok(Ok((test, reports))) => {
+                    log::info!(
+                        "Received report from test {} for patch {}.",
+                        test,
+                        patch.display()
+                    );
                     res.tests.insert(test, reports);
                 }
                 Ok(Err(error)) => {
+                    log::error!(
+                        "An error occurred when running tests for patch {}. Error: {}.",
+                        patch.display(),
+                        error
+                    );
                     handles.iter().for_each(JoinHandle::abort);
 
                     return Err(error);
                 }
                 Err(error) => {
+                    log::error!(
+                        "Internal task panicked when running tests for patch {}. Error: {}.",
+                        patch.display(),
+                        error
+                    );
                     handles.iter().for_each(JoinHandle::abort);
 
                     return Err(io::Error::new(io::ErrorKind::Other, error));
@@ -274,11 +293,19 @@ impl Tester {
 
         task::spawn(async move {
             let res = if let Err(e) = prepare_dir(&artifacts).await {
+                log::error!(
+                    "Failed to prepare the artifacts directory at {} for solution {}. Error: {}.",
+                    artifacts.display(),
+                    patch.id(),
+                    e
+                );
                 Err(e)
             } else {
+                log::info!("Starting a test run for solution {}.", patch.id());
                 self.processor.process(patch.path(), &artifacts).await
             };
 
+            log::info!("Test run finished for solution {}.", patch.id());
             self.reports_sink.send((patch, res)).ok();
         });
     }

@@ -119,16 +119,24 @@ impl StepConfig {
 
     async fn normalize_path(&mut self, base: &Path) -> io::Result<()> {
         if let Self::FileTransfer { from, .. } = self {
-            println!("{}", base.join(from.as_path()).display());
-            let normalized = fs::canonicalize(base.join(from.as_path())).await?;
-            *from = normalized;
+            match fs::canonicalize(base.join(from.as_path())).await {
+                Ok(normalized) => *from = normalized,
+                Err(error) => {
+                    log::error!(
+                        "Failed to canonicalize path {}. Error: {}.",
+                        from.display(),
+                        error
+                    );
+                    return Err(error);
+                }
+            }
         }
 
         Ok(())
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct ScenarioConfig {
     pub retries: Option<usize>,
     pub steps: Vec<Vec<StepConfig>>,
@@ -169,7 +177,7 @@ impl ScenarioConfig {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct Config {
     #[serde(default = "defaults::user")]
     pub user: String,
@@ -199,7 +207,10 @@ impl Config {
             serde_yaml::from_slice(&bytes[..])?
         };
 
-        let parent = path.parent().ok_or(ConfigError::NoParent)?;
+        let parent = path.parent().ok_or_else(|| {
+            log::error!("Suite file path has no parent.");
+            ConfigError::NoParent
+        })?;
 
         if let Some(scenario) = config.build.as_mut() {
             scenario.normalize_paths(parent).await?;
