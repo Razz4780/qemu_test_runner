@@ -26,10 +26,10 @@ pub struct ExecutorConfig {
 
 #[derive(Debug, Serialize)]
 pub struct ActionReport {
-    pub action: SshAction,
-    pub timeout_ms: u128,
-    pub elapsed_time_ms: u128,
-    pub output: Output,
+    action: SshAction,
+    timeout_ms: u128,
+    elapsed_time_ms: u128,
+    output: Output,
 }
 
 impl ActionReport {
@@ -42,13 +42,13 @@ impl ActionReport {
 #[derive(Debug, Serialize)]
 pub struct ExecutorReport {
     /// Path to the image used by the [crate::qemu::QemuInstance].
-    pub image: PathBuf,
+    image: PathBuf,
     /// Whether the SSH connection was established before timeout.
-    pub ssh_ok: bool,
+    ssh_ok: bool,
     /// Reports from the executed [SshAction]s.
-    pub action_reports: Vec<ActionReport>,
+    action_reports: Vec<ActionReport>,
     /// Wheter the QEMU process exited with success after a poweroff command.
-    pub exit_ok: bool,
+    exit_ok: bool,
 }
 
 impl ExecutorReport {
