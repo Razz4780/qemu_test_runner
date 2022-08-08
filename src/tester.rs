@@ -305,6 +305,7 @@ impl Tester {
                 self.processor.process(patch.path(), &artifacts).await
             };
 
+            log::info!("Test run finished for solution {}.", patch.id());
             self.reports_sink.send((patch, res)).ok();
         });
     }
