@@ -2,6 +2,8 @@ use super::{base::BaseExecutor, ExecutorConfig, ExecutorReport};
 use crate::{qemu::QemuSpawner, ssh::SshAction};
 use std::{ffi::OsStr, io, time::Duration};
 
+/// A struct used to execute multiple stacks of [SshAction]s on a QEMU image
+/// with reboots in-between stacks.
 pub struct StackExecutor<'a> {
     config: &'a ExecutorConfig,
     reports: Vec<ExecutorReport>,
@@ -10,6 +12,12 @@ pub struct StackExecutor<'a> {
 }
 
 impl<'a> StackExecutor<'a> {
+    /// # Arguments
+    /// * config - configuration for SSH and timeouts.
+    /// * spawner - used to spawn new [crate::qemu::QemuInstance]s.
+    /// * image - path to the image to operate on.
+    /// # Returns
+    /// A new instance of this struct.
     pub fn new(
         config: &'a ExecutorConfig,
         spawner: &'a QemuSpawner,
@@ -23,6 +31,9 @@ impl<'a> StackExecutor<'a> {
         }
     }
 
+    /// Opens a new stack. This includes spawning a new QEMU process.
+    /// # Returns
+    /// The newly opened stack.
     pub async fn open_stack(&mut self) -> io::Result<Stack<'_>> {
         let qemu = self.spawner.spawn(self.image.to_owned()).await?;
         let inner = BaseExecutor::new(qemu, self.config).await;
@@ -33,21 +44,33 @@ impl<'a> StackExecutor<'a> {
         })
     }
 
+    /// # Returns
+    /// Reports from all [Stack]s opened through this struct.
     pub fn finish(self) -> Vec<ExecutorReport> {
         self.reports
     }
 }
 
+/// A struct used to execute [SshAction]s on a QEMU image.
+/// Basically a wrapper over a [BaseExecutor].
 pub struct Stack<'a> {
     inner: BaseExecutor<'a>,
     reports: &'a mut Vec<ExecutorReport>,
 }
 
 impl<'a> Stack<'a> {
+    /// # Arguments
+    /// * action - an [SshAction] to run through the wrapped [BaseExecutor].
+    /// * timeout - a timeout for this action.
+    /// # Returns
+    /// Whether the execution was successful.
     pub async fn run(&mut self, action: SshAction, timeout: Duration) -> io::Result<bool> {
         self.inner.run(action, timeout).await
     }
 
+    /// Finishes the wrapped [BaseExecutor].
+    /// # Returns
+    /// Whether all [SshAction]s performed with the wrapped [BaseExecutor] were successful.
     pub async fn finish(self) -> io::Result<bool> {
         let report = self.inner.finish().await?;
         let success = report.success();
@@ -56,6 +79,12 @@ impl<'a> Stack<'a> {
         Ok(success)
     }
 
+    /// Runs the given [SshAction]s until one of them is not successful
+    /// and finishes the wrapped [BaseExecutor].
+    /// # Arguments
+    /// iter - an iterator of [SshAction]s to run and their timeouts.
+    /// # Returns
+    /// Whether all [SshAction]s performed with the wrapped [BaseExecutor] were successful.
     pub async fn run_until_failure<I>(mut self, iter: I) -> io::Result<bool>
     where
         I: Iterator<Item = (SshAction, Duration)>,

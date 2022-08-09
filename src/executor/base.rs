@@ -10,8 +10,7 @@ use std::{
 };
 use tokio::time;
 
-/// A wrapper over a [QemuInstance].
-/// Used to interact with the instance over SSH.
+/// A wrapper over a [QemuInstance]. Used to run [SshAction]s and collect [ExecutorReport].
 pub struct BaseExecutor<'a> {
     qemu: QemuInstance,
     config: &'a ExecutorConfig,
@@ -20,8 +19,11 @@ pub struct BaseExecutor<'a> {
 }
 
 impl<'a> BaseExecutor<'a> {
-    /// Creates a new instance of this struct.
-    /// This instance will operate on the given [QemuInstance].
+    /// # Arguments
+    /// * qemu - the QEMU process to wrap.
+    /// * config - configuration for SSH and timeouts.
+    /// # Returns
+    /// A new instance of this struct.
     pub async fn new(qemu: QemuInstance, config: &'a ExecutorConfig) -> BaseExecutor<'a> {
         let ssh = time::timeout(config.connection_timeout, async {
             loop {
@@ -50,7 +52,7 @@ impl<'a> BaseExecutor<'a> {
 
         if ssh.is_some() {
             log::debug!(
-                "Established an SSH connection to a QEMU instance running image: {}.",
+                "Established an SSH connection to the QEMU instance [{}].",
                 qemu.image_path().to_string_lossy()
             );
         }
@@ -63,7 +65,11 @@ impl<'a> BaseExecutor<'a> {
         }
     }
 
-    /// Return - success
+    /// # Arguments
+    /// * action - an [SshAction] to run on the wrapped QEMU process.
+    /// * timeout - a timeout for this action.
+    /// # Returns
+    /// Whether the execution was successful.
     pub async fn run(&mut self, action: SshAction, timeout: Duration) -> io::Result<bool> {
         let ssh = match self.ssh.as_mut() {
             Some(ssh) => ssh,
@@ -87,7 +93,7 @@ impl<'a> BaseExecutor<'a> {
             output,
         };
         log::debug!(
-            "Executed an action {:?} on a QEMU instance running image {}.",
+            "Executed an action {:?} on the QEMU instance [{}].",
             report,
             self.qemu.image_path().to_string_lossy()
         );
@@ -96,13 +102,17 @@ impl<'a> BaseExecutor<'a> {
         Ok(success)
     }
 
+    /// Executes a poweroff command (configured with the [ExecutorConfig]) on the wrapped QEMU process
+    /// and waits for the process to exit.
+    /// # Returns
+    /// A report from all [SshAction]s performed through this struct.
     pub async fn finish(mut self) -> io::Result<ExecutorReport> {
         let image = self.qemu.image_path().to_os_string();
 
         let (ssh_ok, exit_ok) = match self.ssh.as_mut() {
             Some(ssh) => {
                 log::debug!(
-                    "Executing a poweroff command '{}' on a QEMU instance running image {}.",
+                    "Executing a poweroff command '{}' on the QEMU instance [{}].",
                     self.config.poweroff_command,
                     image.to_string_lossy()
                 );
@@ -124,16 +134,16 @@ impl<'a> BaseExecutor<'a> {
 
                 match res {
                     Ok(Ok(_)) => {
-                        log::debug!(
-                            "QEMU process running image {} exited on time.",
-                            image.to_string_lossy()
-                        );
+                        log::debug!("QEMU process [{}] exited on time.", image.to_string_lossy());
                         self.qemu.wait().await?;
                         (true, true)
                     }
                     Ok(Err(error)) => return Err(error),
                     Err(_) => {
-                        log::debug!("QEMU process running image {} did not exit on time, killing the process.", image.to_string_lossy());
+                        log::debug!(
+                            "QEMU process [{}] did not exit on time, killing the process.",
+                            image.to_string_lossy()
+                        );
                         self.qemu.kill().await.ok();
                         self.qemu.wait().await.ok();
                         (true, false)

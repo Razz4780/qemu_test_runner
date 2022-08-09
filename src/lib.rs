@@ -10,23 +10,30 @@ pub mod stats;
 pub mod tasks;
 pub mod tester;
 
+/// A result of running an [ssh::SshAction].
 #[derive(Serialize, Debug)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Output {
+    /// The action finished and its output was collected.
     Finished {
+        /// Exit code of the process.
         exit_code: i32,
         #[serde(
             skip_serializing_if = "Vec::is_empty",
             serialize_with = "serialize_bytes_lossy"
         )]
+        /// Stdout of the process.
         stdout: Vec<u8>,
         #[serde(
             skip_serializing_if = "Vec::is_empty",
             serialize_with = "serialize_bytes_lossy"
         )]
+        /// Stderr of the process.
         stderr: Vec<u8>,
     },
+    /// The action timed out.
     Timeout,
+    /// An SSH error occurred when executing the action.
     Error {
         #[serde(serialize_with = "serialize_io_error")]
         error: io::Error,
@@ -34,10 +41,14 @@ pub enum Output {
 }
 
 impl Output {
+    /// # Returns
+    /// Whether the execution was successful.
     pub fn success(&self) -> bool {
         matches!(self, Self::Finished { exit_code: 0, .. })
     }
 
+    /// # Returns
+    /// The stdout collected from the action, if exists.
     pub fn stdout(&self) -> Option<&[u8]> {
         match self {
             Self::Finished { stdout, .. } => Some(&stdout[..]),
@@ -46,6 +57,8 @@ impl Output {
         }
     }
 
+    /// # Returns
+    /// The stderr collected from the action, if exists.
     pub fn stderr(&self) -> Option<&[u8]> {
         match self {
             Self::Finished { stderr, .. } => Some(&stderr[..]),

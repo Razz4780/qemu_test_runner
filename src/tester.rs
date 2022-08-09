@@ -18,15 +18,23 @@ use tokio::{
     task::{self, JoinHandle},
 };
 
+/// A single step during building or testing.
 #[derive(Debug)]
 pub enum Step {
+    /// Executing an [SshAction].
     Action {
+        /// Action to execute.
         action: SshAction,
+        /// Timeout for this action.
         timeout: Duration,
     },
+    /// Transfering the solution to the guest machine.
     TransferPatch {
+        /// Path to the destination file on the guest machine.
         to: PathBuf,
+        /// Permissions of the destination file one the guest machine.
         mode: i32,
+        /// Timeout for this transfer.
         timeout: Duration,
     },
 }
@@ -51,22 +59,32 @@ impl Step {
     }
 }
 
+/// A scenario for the build process or a single test.
 #[derive(Debug, Default)]
 pub struct Scenario {
+    /// Number of allowed retries.
     pub retries: usize,
+    /// Stacks of [Step]s to execute with reboots in-between.
     pub steps: Vec<Vec<Step>>,
 }
 
+/// A config for the whole build-and-test process.
 #[derive(Debug)]
 pub struct RunConfig {
+    /// Common configuration for the whole process.
     pub execution: ExecutorConfig,
+    /// Build process configuration.
     pub build: Scenario,
+    /// Test configurations.
     pub tests: HashMap<String, Scenario>,
 }
 
+/// A report from a single [Scenario].
 #[derive(Default, Serialize)]
 pub struct ScenarioReport {
+    /// Images used for all attempts.
     images: Vec<PathBuf>,
+    /// Reports from all attempts.
     attempts: Vec<Vec<ExecutorReport>>,
 }
 
@@ -80,6 +98,8 @@ impl ScenarioReport {
         self.images.last().map(AsRef::as_ref)
     }
 
+    /// # Returns
+    /// Whether the scenario was successful.
     pub fn success(&self) -> bool {
         self.attempts
             .last()
@@ -88,6 +108,7 @@ impl ScenarioReport {
     }
 }
 
+/// A report from the whole build-and-test process.
 #[derive(Serialize)]
 pub struct RunReport {
     build: ScenarioReport,
@@ -95,10 +116,14 @@ pub struct RunReport {
 }
 
 impl RunReport {
+    /// # Returns
+    /// Report from the build scenario.
     pub fn build(&self) -> &ScenarioReport {
         &self.build
     }
 
+    /// # Returns
+    /// Reports from the test scenarios.
     pub fn tests(&self) -> &HashMap<String, ScenarioReport> {
         &self.tests
     }
@@ -116,10 +141,15 @@ async fn prepare_dir(path: &Path) -> io::Result<()> {
 
 type TestWorker = JoinHandle<io::Result<(String, ScenarioReport)>>;
 
+/// A struct for executing build-and-test processes on [Patch]es.
 pub struct PatchProcessor {
+    /// The spawner which will be used to create new QEMU processes.
     pub spawner: QemuSpawner,
+    /// The builder which will be user to create new QEMU images.
     pub builder: ImageBuilder,
+    /// Path to the base QEMU image.
     pub base_image: PathBuf,
+    /// Configuration for the process.
     pub run_config: RunConfig,
 }
 
@@ -223,6 +253,12 @@ impl PatchProcessor {
         Ok(handles)
     }
 
+    /// Executes the build-and-test process for a single patch.
+    /// # Arguments
+    /// patch - path to the processed solution.
+    /// artifacts_root - root directory for artifacts from the process.
+    /// # Returns
+    /// A [RunReport] from the process.
     pub async fn process(
         self: Arc<Self>,
         patch: &Path,
@@ -280,14 +316,21 @@ impl PatchProcessor {
     }
 }
 
+/// A struct for scheduling build-and-test processes.
 #[derive(Clone)]
 pub struct Tester {
+    /// The processor which will be used for scheduling.
     pub processor: Arc<PatchProcessor>,
+    /// The root directory for the artifacts.
     pub artifacts_root: PathBuf,
+    /// The channel to which this results will be sent asynchronously.
     pub reports_sink: UnboundedSender<(Patch, io::Result<RunReport>)>,
 }
 
 impl Tester {
+    /// Schedules a build-and-test process.
+    /// # Arguments
+    /// patch - solution to process.
     pub async fn schedule(self, patch: Patch) {
         let artifacts = self.artifacts_root.join(patch.id());
 

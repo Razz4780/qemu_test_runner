@@ -1,8 +1,7 @@
 use clap::Parser;
 use qemu_test_runner::{
-    config::Config,
     maybe_tmp::MaybeTmp,
-    patch_validator::Patch,
+    patch_validator::{Patch, PatchValidator},
     qemu::{ImageBuilder, QemuConfig, QemuSpawner},
     stats::Stats,
     tasks::{InputTask, TesterTask},
@@ -31,7 +30,7 @@ struct Args {
     /// Maximal count of concurrent QEMU processes running.
     concurrency: usize,
     #[clap(long, value_parser, default_value = "qemu-system-x86_64")]
-    /// Command used to invoke a QEMU process.
+    /// Command used to spawn new QEMU processes.
     qemu_system: OsString,
     #[clap(long, value_parser, default_value_t = 1024)]
     /// Memory limit for a QEMU process (megabytes).
@@ -43,10 +42,10 @@ struct Args {
     /// Whether to turn off the irqchip for QEMU processes.
     qemu_irqchip_off: bool,
     #[clap(long, value_parser, default_value = "qemu-img")]
-    /// Command used to work with QEMU images.
+    /// Command used to create new qcow2 images.
     qemu_img: OsString,
     #[clap(long, value_parser)]
-    /// Base MINIX3 image.
+    /// Base MINIX3 image (raw).
     minix_base: PathBuf,
     #[clap(long, value_parser)]
     /// Output directory for artifacts (qcow2 images).
@@ -57,13 +56,13 @@ struct Args {
 }
 
 async fn make_patch_processor(args: Args) -> PatchProcessor {
-    let run_config: RunConfig = {
-        let config = Config::from_file(&args.suite)
-            .await
-            .expect("failed to process the config file");
-        log::debug!("Successfuly parsed the suite file: {:?}", config);
-        config.into()
-    };
+    if args.concurrency == 0 {
+        panic!("concurrency level cannot be set below 1");
+    }
+
+    let run_config = RunConfig::from_file(&args.suite)
+        .await
+        .expect("failed to process the suite file");
 
     let qemu_config = QemuConfig {
         cmd: args.qemu_system,
@@ -222,12 +221,17 @@ async fn main() -> ExitCode {
         };
         task::spawn(task.run())
     };
-    let input_task = task::spawn(async move {
-        InputTask::new(input_tx)
-            .run()
-            .await
-            .expect("an IO error occurred")
-    });
+    let input_task = {
+        let task = InputTask {
+            validator: PatchValidator::default(),
+            patch_sink: input_tx,
+        };
+        tokio::spawn(async move {
+            task.run()
+                .await
+                .expect("an IO error occurred when reading from stdin")
+        })
+    };
 
     let stats = consume_results(tester_rx, reports_dir.as_deref()).await;
 

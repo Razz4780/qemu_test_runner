@@ -18,13 +18,18 @@ use tokio::{
     task, time,
 };
 
+/// An image for QEMU process.
 #[derive(Clone, Copy)]
 pub enum Image<'a> {
+    /// A copy-on-write image.
     Qcow2(&'a Path),
+    /// A raw image.
     Raw(&'a Path),
 }
 
 impl<'a> Image<'a> {
+    /// # Returns
+    /// The path to the image file.
     pub fn path(self) -> &'a Path {
         match self {
             Self::Qcow2(p) => p,
@@ -32,7 +37,7 @@ impl<'a> Image<'a> {
         }
     }
 
-    pub fn format(self) -> &'static OsStr {
+    fn format(self) -> &'static OsStr {
         match self {
             Self::Qcow2(_) => "qcow2".as_ref(),
             Self::Raw(_) => "raw".as_ref(),
@@ -40,14 +45,17 @@ impl<'a> Image<'a> {
     }
 }
 
-/// A struct for building new Qemu images.
+/// A struct for building new QEMU images.
 pub struct ImageBuilder {
     /// Command invoked to create a new image.
     pub cmd: OsString,
 }
 
 impl ImageBuilder {
-    /// Creates a new image located at `dst` and backed by `src`.
+    /// Creates a new copy-on-write image.
+    /// # Arguments
+    /// src - source (backing) image.
+    /// dst - destination (backed) image.
     pub async fn create(&self, src: Image<'_>, dst: Image<'_>) -> io::Result<()> {
         Command::new(&self.cmd)
             .arg("create")
@@ -72,7 +80,7 @@ struct MonitorHandle {
 }
 
 impl MonitorHandle {
-    /// Name of the UNIX socket file, fixed.
+    /// Name of the UNIX socket file.
     const SOCKET_NAME: &'static str = "monitor.sock";
 
     /// Creates a new instance of this struct.
@@ -142,14 +150,16 @@ pub struct QemuInstance {
 }
 
 impl QemuInstance {
-    /// Returns a [SocketAddr] for the SSH connection.
+    /// # Returns
+    /// A [SocketAddr] for the SSH connection with the wrapped QEMU instance.
     pub async fn ssh(&self) -> io::Result<SocketAddr> {
         let port = self.monitor.ssh_port().await?;
 
         Ok(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port))
     }
 
-    /// Returns a path to the QEMU image of this instance.
+    /// # Returns
+    /// The path to the QEMU image used by the wrapped instance.
     pub fn image_path(&self) -> &OsStr {
         &self.image_path
     }
@@ -159,21 +169,24 @@ impl QemuInstance {
         self.child.as_mut().unwrap().kill().await
     }
 
-    /// Waits for the wrapped [Child].
+    /// Waits for the wrapped [Child] to exit.
     pub async fn wait(mut self) -> io::Result<()> {
         let output = self.child.take().unwrap().wait_with_output().await?;
         if output.status.success() {
             Ok(())
         } else if let Some(code) = output.status.code() {
             log::warn!(
-                "QEMU process running image {} unexpectedly ended with error code {}.",
+                "QEMU process [{}] unexpectedly ended with error code {}.",
                 self.image_path.to_string_lossy(),
                 code
             );
-            Err(io::Error::from_raw_os_error(code))
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("process exited with a non-zero code {}", code),
+            ))
         } else {
             log::warn!(
-                "QEMU process runnning image {} was unexpectedly killed by a signal.",
+                "QEMU process [{}] was unexpectedly killed by a signal.",
                 self.image_path.to_string_lossy()
             );
             Err(io::Error::new(
@@ -184,6 +197,8 @@ impl QemuInstance {
     }
 
     /// Checks whether the wrapped [Child] has exited.
+    /// # Returns
+    /// Exit status of the wrapped [Child], if available.
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         self.child.as_mut().unwrap().try_wait()
     }
@@ -204,7 +219,7 @@ impl Drop for QemuInstance {
 
 /// A config for spawning new [QemuInstance]s.
 pub struct QemuConfig {
-    /// The command used to invoke QEMU.
+    /// The command used to spawn a QEMU process.
     pub cmd: OsString,
     /// The memory limit for new instances (megabytes).
     pub memory: u16,
@@ -221,8 +236,13 @@ pub struct QemuSpawner {
 }
 
 impl QemuSpawner {
-    /// Creates a new instance of this struct.
-    /// At any time there will be at most `children_limit` running QEMU processes spawned with this instance.
+    /// # Arguments
+    /// * children_limit - limit for concurrently running QEMU processes.
+    /// * config - configuration for spawning new QEMU processes.
+    /// # Returns
+    /// A new instance of this struct.
+    /// At any time there will be at most `children_limit` running QEMU processes
+    /// spawned with this instance.
     pub fn new(children_limit: usize, config: QemuConfig) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(children_limit)),
@@ -230,7 +250,6 @@ impl QemuSpawner {
         }
     }
 
-    /// Prepares a [Command] to spawn a new instance.
     fn setup_cmd(&self, image_path: &OsStr, monitor_socket: &OsStr) -> Command {
         let mut drive = OsString::new();
         drive.push("file=");
@@ -272,8 +291,11 @@ impl QemuSpawner {
     }
 
     /// Spawns a new QEMU instance.
-    /// The instance will use the image under the given `image_path`.
     /// This method will wait if there are too many running QEMU processes spawned with this instance.
+    /// # Arguments
+    /// * image_path - path to the QEMU image to use.
+    /// # Returns
+    /// A newly spawned QEMU processed wrapped in a [QemuInstance].
     pub async fn spawn(&self, image_path: OsString) -> io::Result<QemuInstance> {
         log::debug!(
             "Awaiting for a permission to spawn a QEMU process on image {}.",

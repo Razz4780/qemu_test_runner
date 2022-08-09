@@ -7,10 +7,14 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io, path::Path, path::PathBuf, time::Duration};
 use tokio::fs;
 
+/// An error that can occur when reading [RunConfig] from a file.
 #[derive(Debug)]
 pub enum ConfigError {
+    /// A deserialization error.
     Serde(serde_yaml::Error),
+    /// An IO error.
     Io(io::Error),
+    /// The path to the file had no parent.
     NoParent,
 }
 
@@ -56,22 +60,35 @@ mod defaults {
     }
 }
 
+/// A configuration for a single step executed in a QEMU process.
 #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum StepConfig {
+enum StepConfig {
+    /// File transfer from host to guest over SSH.
     FileTransfer {
+        /// Path to the source file on the host machine.
         from: PathBuf,
+        /// Path to the destination file on the guest machine.
         to: PathBuf,
+        /// Permissions for the destination file on the guest machine.
         mode: Option<i32>,
+        /// Timeout for the file transfer (milliseconds).
         timeout_ms: Option<u64>,
     },
+    /// Patch file transfer from host to guest over SSH.
     PatchTransfer {
+        /// Path to the destination file on the guest machine.
         to: PathBuf,
+        /// Permissions for the destination file on the guest machine.
         mode: Option<i32>,
+        /// Timeout for the file transfer (milliseconds).
         timeout_ms: Option<u64>,
     },
+    /// Command execution over SSH.
     Command {
+        /// Command to execute.
         command: String,
+        /// Timeout for the command (milliseconds).
         timeout_ms: Option<u64>,
     },
 }
@@ -137,9 +154,9 @@ impl StepConfig {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct ScenarioConfig {
-    pub retries: Option<usize>,
-    pub steps: Vec<Vec<StepConfig>>,
+struct ScenarioConfig {
+    retries: Option<usize>,
+    steps: Vec<Vec<StepConfig>>,
 }
 
 impl ScenarioConfig {
@@ -178,50 +195,26 @@ impl ScenarioConfig {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct Config {
+struct Config {
     #[serde(default = "defaults::user")]
-    pub user: String,
+    user: String,
     #[serde(default = "defaults::password")]
-    pub password: String,
+    password: String,
     #[serde(default = "defaults::timeout_20_s")]
-    pub ssh_timeout_ms: u64,
+    ssh_timeout_ms: u64,
     #[serde(default = "defaults::timeout_20_s")]
-    pub poweroff_timeout_ms: u64,
+    poweroff_timeout_ms: u64,
     #[serde(default = "defaults::poweroff_command")]
-    pub poweroff_command: String,
+    poweroff_command: String,
     #[serde(default = "defaults::retries")]
-    pub retries: usize,
+    retries: usize,
     #[serde(default = "defaults::timeout_5_s")]
-    pub step_timeout_ms: u64,
+    step_timeout_ms: u64,
     #[serde(default = "defaults::mode")]
-    pub file_mode: i32,
-    pub build: Option<ScenarioConfig>,
-    pub tests: HashMap<String, ScenarioConfig>,
-    pub output_limit: Option<u64>,
-}
-
-impl Config {
-    pub async fn from_file(path: &Path) -> Result<Self, ConfigError> {
-        let mut config: Self = {
-            let bytes = fs::read(path).await?;
-            serde_yaml::from_slice(&bytes[..])?
-        };
-
-        let parent = path.parent().ok_or_else(|| {
-            log::error!("Suite file path has no parent.");
-            ConfigError::NoParent
-        })?;
-
-        if let Some(scenario) = config.build.as_mut() {
-            scenario.normalize_paths(parent).await?;
-        }
-
-        for scenario in config.tests.values_mut() {
-            scenario.normalize_paths(parent).await?;
-        }
-
-        Ok(config)
-    }
+    file_mode: i32,
+    build: Option<ScenarioConfig>,
+    tests: HashMap<String, ScenarioConfig>,
+    output_limit: Option<u64>,
 }
 
 impl From<Config> for RunConfig {
@@ -250,6 +243,35 @@ impl From<Config> for RunConfig {
                 .map(|(name, scenario_config)| (name, make_scenario(scenario_config)))
                 .collect(),
         }
+    }
+}
+
+impl RunConfig {
+    /// # Arguments
+    /// * path - path to the file containing a yaml description of the config
+    /// # Returns
+    /// A new instance of this struct.
+    pub async fn from_file(path: &Path) -> Result<Self, ConfigError> {
+        let mut config: Config = {
+            let bytes = fs::read(path).await?;
+            serde_yaml::from_slice(&bytes[..])?
+        };
+
+        let path = fs::canonicalize(path).await?;
+        let parent = path.parent().ok_or_else(|| {
+            log::error!("Suite file path has no parent.");
+            ConfigError::NoParent
+        })?;
+
+        if let Some(scenario) = config.build.as_mut() {
+            scenario.normalize_paths(parent).await?;
+        }
+
+        for scenario in config.tests.values_mut() {
+            scenario.normalize_paths(parent).await?;
+        }
+
+        Ok(config.into())
     }
 }
 
