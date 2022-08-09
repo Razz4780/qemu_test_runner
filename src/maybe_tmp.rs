@@ -1,9 +1,10 @@
 use std::{
-    io::{self, ErrorKind},
+    io,
     path::{Path, PathBuf},
 };
 use tempfile::TempDir;
-use tokio::fs;
+
+use crate::prepare_dir;
 
 /// A wrapper over a directory that may or may not be temporary.
 pub enum MaybeTmp {
@@ -20,15 +21,8 @@ impl MaybeTmp {
     /// * path - path of the directory to wrap
     /// # Returns
     /// A new instance of this struct.
-    pub async fn at_path(path: &Path) -> io::Result<Self> {
-        let path = fs::canonicalize(path).await?;
-
-        if let Err(e) = fs::create_dir_all(&path).await {
-            if e.kind() != ErrorKind::AlreadyExists {
-                return Err(e);
-            }
-        }
-
+    pub async fn at_path(path: PathBuf) -> io::Result<Self> {
+        prepare_dir(path.as_path()).await?;
         Ok(Self::NotTmp(path))
     }
 

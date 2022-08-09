@@ -1,5 +1,10 @@
 use serde::{Serialize, Serializer};
-use std::io;
+use std::{
+    io::{self, ErrorKind},
+    path::Path,
+};
+use tokio::fs;
+
 pub mod config;
 pub mod executor;
 pub mod maybe_tmp;
@@ -7,8 +12,21 @@ pub mod patch_validator;
 pub mod qemu;
 pub mod ssh;
 pub mod stats;
-pub mod tasks;
 pub mod tester;
+
+/// Attempts to create all missing directories on the given path.
+/// Does nothing if the path already exists.
+/// # Arguments
+/// path - path to the last directory.
+pub async fn prepare_dir(path: &Path) -> io::Result<()> {
+    if let Err(e) = fs::create_dir_all(&path).await {
+        if e.kind() != ErrorKind::AlreadyExists {
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
 
 /// A result of running an [ssh::SshAction].
 #[derive(Serialize, Debug)]
