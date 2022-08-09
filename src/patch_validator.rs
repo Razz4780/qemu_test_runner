@@ -8,12 +8,18 @@ use std::{
 };
 use tokio::fs;
 
+/// An error that can occur during patch path validation.
 #[derive(Debug)]
 pub enum ValidationError {
+    /// An IO error.
     Io(io::Error),
+    /// The path has no filename.
     NoFilename,
+    /// The path has invalid filename.
     InvalidFilename,
+    /// The path does not represent a file.
     NotAFile,
+    /// The ID extracted from the path was already seen before.
     AlreadySeen(PathBuf),
 }
 
@@ -37,24 +43,30 @@ impl From<io::Error> for ValidationError {
     }
 }
 
+/// Path to the patch file containing student's solution.
 #[derive(Debug)]
 pub struct Patch {
     path: PathBuf,
 }
 
 impl Patch {
+    /// # Returns
+    /// The path to the oatch file.
     pub fn path(&self) -> &Path {
         self.path.as_path()
     }
 
+    /// # Returns
+    /// ID of the student.
     pub fn id(&self) -> &str {
         self.path
             .file_stem()
             .and_then(OsStr::to_str)
-            .expect("this struct should contain only validated paths")
+            .expect("this struct contains only validated paths")
     }
 }
 
+/// A struct for validating all of the patch paths during one session.
 #[derive(Default)]
 pub struct PatchValidator {
     seen_patches: HashMap<String, PathBuf>,
@@ -69,6 +81,13 @@ impl PatchValidator {
             && filename[2..8].chars().all(|c| c.is_ascii_digit())
     }
 
+    /// Validates a single path.
+    /// The path must represent a file with filename accepted by the regular expression of form `([a-z]{2}[0-9]{6})\.patch`
+    /// The first group in this regex is the student's ID.
+    /// # Arguments
+    /// * path - path to validate.
+    /// # Returns
+    /// A valid [Patch].
     pub async fn validate(&mut self, path: &Path) -> Result<Patch, ValidationError> {
         let filename = path
             .file_name()

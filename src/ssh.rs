@@ -56,12 +56,19 @@ struct SshWorker {
     /// The channel for new [Work] to do.
     receiver: mpsc::Receiver<Work>,
     /// Limit for stdout and stderr of executed commands.
+    /// The output will be truncated to this length.
     output_limit: Option<u64>,
 }
 
 impl SshWorker {
     /// Opens a new [Session] with the given parameters.
     /// This is a blocking method.
+    /// # Arguments
+    /// addr - [SocketAddr] to connect to.
+    /// username - username of the user to authenticate.
+    /// password - password of the user to authenticate.
+    /// # Returns
+    /// A new SSH [Session].
     fn open_session(addr: SocketAddr, username: &str, password: &str) -> io::Result<Session> {
         let conn = TcpStream::connect(&addr)?;
 
@@ -99,6 +106,10 @@ impl SshWorker {
 
     /// Executes a command on the remote machine.
     /// This is a blocking method.
+    /// # Arguments
+    /// cmd - the command to execute.
+    /// # Returns
+    /// The [Output] of the command.
     fn exec(&mut self, cmd: &str) -> io::Result<Output> {
         let mut channel = self.session.channel_session()?;
         channel.exec(cmd).map_err(io::Error::from)?;
@@ -127,6 +138,10 @@ impl SshWorker {
 
     /// Transfers a file to the remote machine.
     /// This is a blocking method.
+    /// # Arguments
+    /// local - path to the source file on the local machine.
+    /// remote - path to the destination file on the remote machine.
+    /// mode - permissions of the destination file on the remote machine.
     fn send(&mut self, local: &Path, remote: &Path, mode: i32) -> io::Result<()> {
         let mut file = File::open(local)?;
         let size = file.metadata()?.len();
@@ -143,13 +158,20 @@ impl SshWorker {
     }
 }
 
+/// A handle for executing [SshAction]s on a remote machine.
 pub struct SshHandle {
     /// The channel for sending [Work] to the worker.
     sender: mpsc::Sender<Work>,
 }
 
 impl SshHandle {
-    /// Creates a new instance of this struct.
+    /// # Arguments
+    /// addr - [SocketAddr] of the SSH server.
+    /// username - username of the user to authenticate.
+    /// password - password of the user to authenticate.
+    /// output_limit - limit for stdin and stderr of executed commands.
+    /// # Returns
+    /// A new instance of this struct.
     pub async fn new(
         addr: SocketAddr,
         username: String,
@@ -204,6 +226,10 @@ impl SshHandle {
     }
 
     /// Executes an [SshAction] on the remote machine.
+    /// # Arguments
+    /// cmd - action to execute.
+    /// # Returns
+    /// [Output] of the executed action.
     pub async fn exec(&mut self, cmd: SshAction) -> io::Result<Output> {
         let (tx, rx) = oneshot::channel();
 

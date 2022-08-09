@@ -8,12 +8,16 @@ use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
 };
 
+/// A task for proxying incoming solutions to the [Tester].
 pub struct TesterTask {
+    /// The tester which this task feeds with new solutions.
     pub tester: Tester,
+    /// The channel from which this task polls inputs.
     pub patch_source: UnboundedReceiver<Patch>,
 }
 
 impl TesterTask {
+    /// Runs this task until there are no more inputs.
     pub async fn run(mut self) {
         while let Some(patch) = self.patch_source.recv().await {
             self.tester.clone().schedule(patch).await;
@@ -23,19 +27,19 @@ impl TesterTask {
     }
 }
 
+/// A task for reading paths to the solutions from the stdin.
 pub struct InputTask {
+    /// The validator used on the solutions.
     pub validator: PatchValidator,
+    /// The channel to which this task will send [Patch]es.
     pub patch_sink: UnboundedSender<Patch>,
 }
 
 impl InputTask {
-    pub fn new(patch_sink: UnboundedSender<Patch>) -> Self {
-        Self {
-            patch_sink,
-            validator: Default::default(),
-        }
-    }
-
+    /// Runs this task until the end of stdin.
+    /// Empty lines will be ignored.
+    /// # Returns
+    /// Number of rejected lines.
     pub async fn run(mut self) -> io::Result<usize> {
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin);
@@ -44,6 +48,10 @@ impl InputTask {
         let mut invalid_lines = 0;
 
         while reader.read_line(&mut buf).await? > 0 {
+            if buf.is_empty() {
+                continue;
+            }
+
             let path = PathBuf::from(&buf);
             buf.clear();
 
@@ -51,7 +59,11 @@ impl InputTask {
                 Ok(patch) => patch,
                 Err(error) => {
                     invalid_lines += 1;
-                    log::warn!("Invalid path {} ignored. Error: {}.", path.display(), error);
+                    log::warn!(
+                        "Invalid path `{}` ignored. Error: {}.",
+                        path.display(),
+                        error
+                    );
                     continue;
                 }
             };
