@@ -142,7 +142,7 @@ impl LineProcessor {
             "build failed".into()
         };
 
-        let line = format!("{};{};{}\n", patch.id(), patch.path().display(), report_col);
+        let line = format!("{};{}\n", patch, report_col);
         self.stdout
             .lock()
             .await
@@ -153,7 +153,7 @@ impl LineProcessor {
 
     async fn save_report(&self, patch: &Patch, report: &RunReport) -> Result<()> {
         if let Some(dir) = self.reports_dir.as_ref() {
-            let buf = serde_json::to_vec(report).map_err(|error| {
+            let buf = serde_json::to_vec_pretty(report).map_err(|error| {
                 Error::new(
                     ErrorKind::Other,
                     format!("failed to serialize report: {}", error),
@@ -166,7 +166,7 @@ impl LineProcessor {
             fs::write(&path, &buf[..]).await?;
             log::info!(
                 "Successfuly saved report for solution {} at {}.",
-                patch.path().display(),
+                patch,
                 path.display()
             );
         }
@@ -183,7 +183,7 @@ impl LineProcessor {
             .await
         {
             Ok(patch) => {
-                log::info!("Starting to process solution {}.", patch.path().display());
+                log::info!("Starting to process solution {}.", patch);
                 patch
             }
             Err(error) => {
@@ -197,13 +197,13 @@ impl LineProcessor {
         self.stats.lock().await.patch_processed(&patch, &run_result);
         let report = match run_result {
             Ok(report) => {
-                log::info!("Successfuly tested solution {}.", patch.path().display());
+                log::info!("Successfuly tested solution {}.", patch);
                 report
             }
             Err(error) => {
                 log::error!(
                     "An error occurred when testing solution {}: {}.",
-                    patch.path().display(),
+                    patch,
                     error
                 );
                 return;
@@ -215,7 +215,7 @@ impl LineProcessor {
         if let Err(error) = self.save_report(&patch, &report).await {
             log::error!(
                 "An error occurred when saving the report for solution {}: {}.",
-                patch.path().display(),
+                patch,
                 error
             );
             self.stats.lock().await.saving_report_failed(&patch);
@@ -246,10 +246,7 @@ async fn main() -> ExitCode {
                 .expect("failed to access the artifacts directory"),
             None => {
                 let tmp = MaybeTmp::tmp().expect("failed to create a temporary directory");
-                log::info!(
-                    "Artifacts direcrory was not specified, artifacts will be stored in {}.",
-                    tmp.path().display()
-                );
+                log::info!("Artifacts direcrory was not specified, artifacts will not be saved.",);
                 tmp
             }
         };
@@ -258,7 +255,7 @@ async fn main() -> ExitCode {
             Some(dir) => prepare_dir(dir.as_path())
                 .await
                 .expect("failed to access the reports directory"),
-            None => log::info!("Reports directory was not specified, reports will not be stored."),
+            None => log::info!("Reports directory was not specified, reports will not be saved."),
         }
 
         (artifacts, reports_dir)

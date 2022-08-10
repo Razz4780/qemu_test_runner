@@ -36,7 +36,7 @@ mod defaults {
     }
 
     pub fn password() -> String {
-        "password".into()
+        "root".into()
     }
 
     pub fn timeout_20_s() -> u64 {

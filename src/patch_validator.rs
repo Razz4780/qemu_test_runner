@@ -66,6 +66,12 @@ impl Patch {
     }
 }
 
+impl Display for Patch {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.path.display())
+    }
+}
+
 /// A struct for validating all of the patch paths during one session.
 #[derive(Default)]
 pub struct PatchValidator {

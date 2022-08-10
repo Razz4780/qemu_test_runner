@@ -24,9 +24,9 @@ impl<'a> BaseExecutor<'a> {
     /// * config - configuration for SSH and timeouts.
     /// # Returns
     /// A new instance of this struct.
-    pub async fn new(qemu: QemuInstance, config: &'a ExecutorConfig) -> BaseExecutor<'a> {
+    pub async fn new(mut qemu: QemuInstance, config: &'a ExecutorConfig) -> BaseExecutor<'a> {
         let ssh = time::timeout(config.connection_timeout, async {
-            loop {
+            while qemu.try_wait().transpose().is_none() {
                 let handle = match qemu.ssh().await {
                     Ok(addr) => {
                         SshHandle::new(
@@ -41,14 +41,17 @@ impl<'a> BaseExecutor<'a> {
                 };
 
                 if let Ok(handle) = handle {
-                    break handle;
+                    return Some(handle);
                 }
 
                 time::sleep(Duration::from_millis(100)).await;
             }
+
+            None
         })
         .await
-        .ok();
+        .ok()
+        .flatten();
 
         if ssh.is_some() {
             log::debug!(
