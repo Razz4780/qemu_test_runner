@@ -147,7 +147,7 @@ impl PatchProcessor {
         let mut report = ScenarioReport::default();
 
         for i in 0..=scenario.retries {
-            let dst = artifacts.join(format!("attempt_{}.img", i + 1));
+            let dst = artifacts.join(format!("attempt_{}.qcow2", i + 1));
             self.builder
                 .create(base_image, Image::Qcow2(dst.as_ref()))
                 .await?;
@@ -186,10 +186,7 @@ impl PatchProcessor {
         let root = self.artifacts_root.join(patch.id());
         prepare_dir(root.as_path()).await?;
 
-        log::info!(
-            "Building a test image for solution {}.",
-            patch.path().display()
-        );
+        log::info!("Building a test image for solution {}.", patch);
         let build_root = root.join("build");
         prepare_dir(build_root.as_path()).await?;
 
@@ -203,7 +200,7 @@ impl PatchProcessor {
             .await?;
 
         let tests = if build.success() {
-            log::info!("Running tests for solution {}.", patch.path().display());
+            log::info!("Running tests for solution {}.", patch);
             let tests_root = root.join("tests");
             prepare_dir(tests_root.as_path()).await?;
 
@@ -228,17 +225,13 @@ impl PatchProcessor {
             while let Some(result) = futs.next().await {
                 match result {
                     Ok((test, report)) => {
-                        log::info!(
-                            "Received report from test {} for solution {}.",
-                            test,
-                            patch.path().display()
-                        );
+                        log::info!("Received report from test {} for solution {}.", test, patch);
                         tests.insert(test.clone(), report);
                     }
                     Err(error) => {
                         log::error!(
                             "An unexpected error occurred when running tests for solution {}. Error: {}.",
-                            patch.path().display(),
+                            patch,
                             error
                         );
                         return Err(error);
@@ -248,10 +241,7 @@ impl PatchProcessor {
 
             tests
         } else {
-            log::info!(
-                "Build process failed for solution {}.",
-                patch.path().display()
-            );
+            log::info!("Build process failed for solution {}.", patch);
 
             Default::default()
         };

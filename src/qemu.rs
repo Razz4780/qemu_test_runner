@@ -181,23 +181,14 @@ impl QemuInstance {
         if output.status.success() {
             Ok(())
         } else if let Some(code) = output.status.code() {
-            log::warn!(
-                "QEMU process [{}] unexpectedly ended with error code {}.",
-                self.image_path.to_string_lossy(),
-                code
-            );
             Err(io::Error::new(
                 io::ErrorKind::Other,
-                format!("process exited with a non-zero code {}", code),
+                format!("QEMU process exited with a non-zero code {}", code),
             ))
         } else {
-            log::warn!(
-                "QEMU process [{}] was unexpectedly killed by a signal.",
-                self.image_path.to_string_lossy()
-            );
             Err(io::Error::new(
                 io::ErrorKind::Other,
-                "process killed by a signal",
+                "QEMU process killed by a signal",
             ))
         }
     }
@@ -291,7 +282,8 @@ impl QemuSpawner {
 
         cmd.stderr(Stdio::piped())
             .stdout(Stdio::piped())
-            .stdin(Stdio::null());
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
 
         cmd
     }
@@ -317,11 +309,9 @@ impl QemuSpawner {
         let monitor = MonitorHandle::new()?;
         let socket = monitor.socket();
 
-        log::debug!(
-            "Spawning a QEMU process on image {}.",
-            image_path.to_string_lossy()
-        );
-        let child = self.setup_cmd(&image_path, socket.as_os_str()).spawn()?;
+        let mut command = self.setup_cmd(&image_path, socket.as_os_str());
+        log::debug!("Spawning a QEMU process. {:?}", command);
+        let child = command.spawn()?;
 
         Ok(QemuInstance {
             child: Some(child),
