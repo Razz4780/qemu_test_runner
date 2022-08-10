@@ -1,0 +1,28 @@
+{
+    "build": {
+        "steps": [
+            [
+                {
+                    "type": "patch_transfer",
+                    "to": "solution.patch"
+                },
+                {
+                    "type": "command",
+                    "command": "cd /some/source/dir && make"
+                }
+            ]
+        ]
+    },
+    "tests": {
+        "a0": {
+            "steps": [
+                [
+                    {
+                        "type": "command",
+                        "command": "echo i do nothing"
+                    }
+                ]
+            ]
+        }
+    }
+}

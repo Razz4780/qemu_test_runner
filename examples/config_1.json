@@ -1,0 +1,71 @@
+{
+    "user": "root",
+    "password": "root",
+    "ssh_timeout_ms": 20000,
+    "poweroff_timeout_ms": 20000,
+    "poweroff_command": "/sbin/poweroff",
+    "retries": 3,
+    "step_timeout_ms": 5000,
+    "build": {
+        "retries": 4,
+        "steps": [
+            [
+                {
+                    "type": "patch_transfer",
+                    "to": "solution.patch",
+                    "timeout_ms": 1000
+                },
+                {
+                    "type": "file_transfer",
+                    "from": "build.sh",
+                    "to": "build.sh"
+                },
+                {
+                    "type": "command",
+                    "command": "./build.sh",
+                    "timeout_ms": 10000
+                }
+            ],
+            [
+                {
+                    "type": "file_transfer",
+                    "from": "tests.zip",
+                    "to": "tests.zip",
+                    "timeout_ms": 1000
+                },
+                {
+                    "type": "command",
+                    "command": "unzip tests.zip && cd tests && make",
+                    "timeout_ms": 5000
+                }
+            ]
+        ]
+    },
+    "tests": {
+        "a0": {
+            "retries": 3,
+            "steps": [
+                [
+                    {
+                        "type": "command",
+                        "command": "./tests/a0.sh",
+                        "timeout_ms": 1000
+                    }
+                ]
+            ]
+        },
+        "a1": {
+            "retries": 3,
+            "steps": [
+                [
+                    {
+                        "type": "command",
+                        "command": "./tests/a1.sh",
+                        "timeout_ms": 1000
+                    }
+                ]
+            ]
+        }
+    },
+    "output_limit": 8096
+}

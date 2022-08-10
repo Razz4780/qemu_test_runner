@@ -1,7 +1,5 @@
 use crate::Output;
-use serde::Deserialize;
-use serde::Serialize;
-use serde::Serializer;
+use serde::{Deserialize, Serialize};
 use ssh2::Session;
 use std::{
     fmt::Display,
@@ -33,18 +31,7 @@ pub enum SshAction {
         from: PathBuf,
         /// Path to the destination on the remote machine.
         to: PathBuf,
-        /// UNIX permissions of the destination file.
-        #[serde(serialize_with = "serialize_i32_octal")]
-        mode: i32,
     },
-}
-
-fn serialize_i32_octal<S>(val: &i32, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let as_string = format!("0o{:o}", val);
-    serializer.serialize_str(&as_string)
 }
 
 struct Work(SshAction, oneshot::Sender<Output>);
@@ -86,13 +73,11 @@ impl SshWorker {
         while let Some(Work(action, tx)) = self.receiver.blocking_recv() {
             let res = match action {
                 SshAction::Exec { cmd } => self.exec(&cmd),
-                SshAction::Send { from, to, mode } => {
-                    self.send(&from, &to, mode).map(|_| Output::Finished {
-                        exit_code: 0,
-                        stdout: Default::default(),
-                        stderr: Default::default(),
-                    })
-                }
+                SshAction::Send { from, to } => self.send(&from, &to).map(|_| Output::Finished {
+                    exit_code: 0,
+                    stdout: Default::default(),
+                    stderr: Default::default(),
+                }),
             };
 
             let output = match res {
@@ -141,12 +126,11 @@ impl SshWorker {
     /// # Arguments
     /// local - path to the source file on the local machine.
     /// remote - path to the destination file on the remote machine.
-    /// mode - permissions of the destination file on the remote machine.
-    fn send(&mut self, local: &Path, remote: &Path, mode: i32) -> io::Result<()> {
+    fn send(&mut self, local: &Path, remote: &Path) -> io::Result<()> {
         let mut file = File::open(local)?;
         let size = file.metadata()?.len();
 
-        let mut remote_file = self.session.scp_send(remote, mode, size, None)?;
+        let mut remote_file = self.session.scp_send(remote, 0o777, size, None)?;
         io::copy(&mut file, &mut remote_file)?;
 
         remote_file.send_eof()?;
@@ -321,7 +305,6 @@ mod test {
                 .exec(SshAction::Send {
                     from: file_path.clone(),
                     to: "dst".into(),
-                    mode: 0o777,
                 })
                 .await
                 .unwrap();

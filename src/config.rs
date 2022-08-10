@@ -11,15 +11,15 @@ use tokio::fs;
 #[derive(Debug)]
 pub enum ConfigError {
     /// A deserialization error.
-    Serde(serde_yaml::Error),
+    Serde(serde_json::Error),
     /// An IO error.
     Io(io::Error),
     /// The path to the file had no parent.
     NoParent,
 }
 
-impl From<serde_yaml::Error> for ConfigError {
-    fn from(error: serde_yaml::Error) -> Self {
+impl From<serde_json::Error> for ConfigError {
+    fn from(error: serde_json::Error) -> Self {
         Self::Serde(error)
     }
 }
@@ -51,10 +51,6 @@ mod defaults {
         3
     }
 
-    pub fn mode() -> i32 {
-        0o777
-    }
-
     pub fn timeout_5_s() -> u64 {
         5 * 1000
     }
@@ -65,13 +61,12 @@ mod defaults {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum StepConfig {
     /// File transfer from host to guest over SSH.
+    /// Destination file will have TODO
     FileTransfer {
         /// Path to the source file on the host machine.
         from: PathBuf,
         /// Path to the destination file on the guest machine.
         to: PathBuf,
-        /// Permissions for the destination file on the guest machine.
-        mode: Option<i32>,
         /// Timeout for the file transfer (milliseconds).
         timeout_ms: Option<u64>,
     },
@@ -79,8 +74,6 @@ enum StepConfig {
     PatchTransfer {
         /// Path to the destination file on the guest machine.
         to: PathBuf,
-        /// Permissions for the destination file on the guest machine.
-        mode: Option<i32>,
         /// Timeout for the file transfer (milliseconds).
         timeout_ms: Option<u64>,
     },
@@ -94,30 +87,20 @@ enum StepConfig {
 }
 
 impl StepConfig {
-    fn into_step(self, default_timeout: Duration, default_mode: i32) -> Step {
+    fn into_step(self, default_timeout: Duration) -> Step {
         match self {
             Self::FileTransfer {
                 from,
                 to,
-                mode,
                 timeout_ms,
             } => Step::Action {
-                action: SshAction::Send {
-                    from,
-                    to,
-                    mode: mode.unwrap_or(default_mode),
-                },
+                action: SshAction::Send { from, to },
                 timeout: timeout_ms
                     .map(Duration::from_millis)
                     .unwrap_or(default_timeout),
             },
-            Self::PatchTransfer {
+            Self::PatchTransfer { to, timeout_ms } => Step::TransferPatch {
                 to,
-                mode,
-                timeout_ms,
-            } => Step::TransferPatch {
-                to,
-                mode: mode.unwrap_or(default_mode),
                 timeout: timeout_ms
                     .map(Duration::from_millis)
                     .unwrap_or(default_timeout),
@@ -160,19 +143,14 @@ struct ScenarioConfig {
 }
 
 impl ScenarioConfig {
-    fn into_scenario(
-        self,
-        default_retries: usize,
-        default_timeout: Duration,
-        default_mode: i32,
-    ) -> Scenario {
+    fn into_scenario(self, default_retries: usize, default_timeout: Duration) -> Scenario {
         let steps = self
             .steps
             .into_iter()
             .map(|phase_config| {
                 phase_config
                     .into_iter()
-                    .map(|step_config| step_config.into_step(default_timeout, default_mode))
+                    .map(|step_config| step_config.into_step(default_timeout))
                     .collect()
             })
             .collect();
@@ -210,8 +188,6 @@ struct Config {
     retries: usize,
     #[serde(default = "defaults::timeout_5_s")]
     step_timeout_ms: u64,
-    #[serde(default = "defaults::mode")]
-    file_mode: i32,
     build: Option<ScenarioConfig>,
     tests: HashMap<String, ScenarioConfig>,
     output_limit: Option<u64>,
@@ -223,7 +199,6 @@ impl From<Config> for RunConfig {
             scenario_config.into_scenario(
                 config.retries,
                 Duration::from_millis(config.step_timeout_ms),
-                config.file_mode,
             )
         };
 
@@ -248,13 +223,13 @@ impl From<Config> for RunConfig {
 
 impl RunConfig {
     /// # Arguments
-    /// * path - path to the file containing a yaml description of the config
+    /// * path - path to the file containing a json description of the config
     /// # Returns
     /// A new instance of this struct.
     pub async fn from_file(path: &Path) -> Result<Self, ConfigError> {
         let mut config: Config = {
             let bytes = fs::read(path).await?;
-            serde_yaml::from_slice(&bytes[..])?
+            serde_json::from_slice(&bytes[..])?
         };
 
         let path = fs::canonicalize(path).await?;
@@ -280,31 +255,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mode_deserialize() {
-        let val = 0o777;
-        let serialized = "0o777";
-        let deserialized: i32 =
-            serde_yaml::from_str(serialized).expect("failed to deserialize octal");
-        assert_eq!(deserialized, val);
-    }
-
-    #[test]
     fn step_config_deserialize() {
         let val = StepConfig::FileTransfer {
             from: "./wow".into(),
             to: "./not/wow".into(),
-            mode: Some(0o234),
             timeout_ms: 12.into(),
         };
-        let serialized = "
-        type: file_transfer
-        from: ./wow
-        to: ./not/wow
-        mode: 0o234
-        timeout_ms: 12
-";
+        let serialized = "{\"type\": \"file_transfer\", \"from\": \"./wow\", \"to\": \"./not/wow\", \"timeout_ms\": 12}";
         let deserialized: StepConfig =
-            serde_yaml::from_str(serialized).expect("failed to deserialize");
+            serde_json::from_str(serialized).expect("failed to deserialize");
         assert_eq!(deserialized, val);
     }
 
@@ -318,12 +277,10 @@ mod tests {
             poweroff_command: "".into(),
             retries: 1,
             step_timeout_ms: 1,
-            file_mode: 0o777,
             build: Some(ScenarioConfig {
                 retries: None,
                 steps: vec![vec![StepConfig::PatchTransfer {
                     to: "./wow".into(),
-                    mode: None,
                     timeout_ms: None,
                 }]],
             }),
@@ -335,9 +292,8 @@ mod tests {
 
         assert_eq!(run_config.build.retries, 1);
         match &run_config.build.steps[0][0] {
-            Step::TransferPatch { to, mode, timeout } => {
+            Step::TransferPatch { to, timeout } => {
                 assert_eq!(to, &PathBuf::from("./wow"));
-                assert_eq!(*mode, 0o777);
                 assert_eq!(timeout.as_millis(), 1);
             }
             other => panic!("unexpected enum option: {:?}", other),
@@ -367,25 +323,21 @@ mod tests {
                 StepConfig::FileTransfer {
                     from: dir.clone(),
                     to: "wow".into(),
-                    mode: None,
                     timeout_ms: None,
                 },
                 StepConfig::FileTransfer {
                     from: "wow".into(),
                     to: "wow".into(),
-                    mode: None,
                     timeout_ms: None,
                 },
                 StepConfig::FileTransfer {
                     from: "./wow".into(),
                     to: "wow".into(),
-                    mode: None,
                     timeout_ms: None,
                 },
                 StepConfig::FileTransfer {
                     from: "../wow".into(),
                     to: "../wow".into(),
-                    mode: None,
                     timeout_ms: None,
                 },
             ]],
