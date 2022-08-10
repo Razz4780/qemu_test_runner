@@ -1,27 +1,36 @@
-use crate::tester::RunReport;
-use std::{
-    collections::{HashMap, HashSet},
-    io,
-    path::{Path, PathBuf},
-};
+use crate::{patch_validator::Patch, tester::RunReport};
+use std::{collections::HashMap, io, path::PathBuf};
 
-/// A struct for collecting statistics from the [RunReport]s.
+/// Statistics from [Patch]es processing.
 #[derive(Default)]
 pub struct Stats {
-    builds_failed: usize,
-    test_failures: HashMap<String, usize>,
-    solutions: usize,
-    internal_errors: HashSet<PathBuf>,
-    failed_report_saves: usize,
+    /// Number of solutions that were rejected by the [crate::patch_validator::PatchValidator].
+    pub invalid_solutions: usize,
+    /// Number of solutions that were accepted by the [crate::patch_validator::PatchValidator].
+    pub valid_solutions: usize,
+    /// Number of solutions that failed to build during the testing process.
+    pub builds_failed: usize,
+    /// Failures count by test.
+    pub test_failures: HashMap<String, usize>,
+    /// Solutions for which an internal error occurred during the testing process.
+    pub internal_errors: Vec<PathBuf>,
+    /// Solutions for which the report was not saved.
+    pub missing_reports: Vec<PathBuf>,
 }
 
 impl Stats {
-    /// Updates this struct with additional information.
+    /// # Returns
+    /// Whether the whole run was successful (no errors occurred).
+    pub fn success(&self) -> bool {
+        self.internal_errors.is_empty() && self.missing_reports.is_empty()
+    }
+
+    /// Updates this struct with info from a finished testing process.
     /// # Arguments
-    /// solution_path - path to the patch file.
-    /// result - test run result.
-    pub fn update(&mut self, solution_path: &Path, result: &io::Result<RunReport>) {
-        self.solutions += 1;
+    /// patch - processed solution.
+    /// result - processing result.
+    pub fn patch_processed(&mut self, patch: &Patch, result: &io::Result<RunReport>) {
+        self.valid_solutions += 1;
 
         match result {
             Ok(report) => {
@@ -36,43 +45,20 @@ impl Stats {
                 }
             }
             Err(_) => {
-                self.internal_errors.insert(solution_path.to_path_buf());
+                self.internal_errors.push(patch.path().to_path_buf());
             }
         }
     }
 
-    /// Informs this struct that saving a detailed report failed.
-    pub fn saving_report_failed(&mut self) {
-        self.failed_report_saves += 1;
+    /// Updates this struct with info that saving a report failed.
+    /// # Arguments
+    /// patch - solution for which the report was not saved.
+    pub fn saving_report_failed(&mut self, patch: &Patch) {
+        self.missing_reports.push(patch.path().to_path_buf());
     }
 
-    /// # Returns
-    /// Number of solutions for which the building process failed.
-    pub fn builds_failed(&self) -> usize {
-        self.builds_failed
-    }
-
-    /// # Returns
-    /// Number of solutions for which each test failed.
-    pub fn test_failures(&self) -> &HashMap<String, usize> {
-        &self.test_failures
-    }
-
-    /// # Returns
-    /// Total number of solutions.
-    pub fn solutions(&self) -> usize {
-        self.solutions
-    }
-
-    /// # Returns
-    /// Paths to solutions for which internal errors occurred during testing.
-    pub fn internal_errors(&self) -> &HashSet<PathBuf> {
-        &self.internal_errors
-    }
-
-    /// # Returns
-    /// Number of reports which were not successfuly saved.
-    pub fn failed_report_saves(&self) -> usize {
-        self.failed_report_saves
+    /// Updates this struct with info that a solution was rejected by the validator.
+    pub fn solution_rejected(&mut self) {
+        self.invalid_solutions += 1;
     }
 }

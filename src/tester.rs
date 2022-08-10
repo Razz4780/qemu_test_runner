@@ -1,21 +1,17 @@
 use crate::{
     executor::{stack::StackExecutor, ExecutorConfig, ExecutorReport},
     patch_validator::Patch,
+    prepare_dir,
     qemu::{Image, ImageBuilder, QemuSpawner},
     ssh::SshAction,
 };
+use futures::{stream::FuturesUnordered, StreamExt};
 use serde::Serialize;
 use std::{
     collections::HashMap,
-    io::{self, ErrorKind},
+    io,
     path::{Path, PathBuf},
-    sync::Arc,
     time::Duration,
-};
-use tokio::{
-    fs,
-    sync::mpsc::UnboundedSender,
-    task::{self, JoinHandle},
 };
 
 /// A single step during building or testing.
@@ -129,18 +125,6 @@ impl RunReport {
     }
 }
 
-async fn prepare_dir(path: &Path) -> io::Result<()> {
-    if let Err(e) = fs::create_dir(path).await {
-        if e.kind() != ErrorKind::AlreadyExists {
-            return Err(e);
-        }
-    }
-
-    Ok(())
-}
-
-type TestWorker = JoinHandle<io::Result<(String, ScenarioReport)>>;
-
 /// A struct for executing build-and-test processes on [Patch]es.
 pub struct PatchProcessor {
     /// The spawner which will be used to create new QEMU processes.
@@ -151,6 +135,8 @@ pub struct PatchProcessor {
     pub base_image: PathBuf,
     /// Configuration for the process.
     pub run_config: RunConfig,
+    /// Root directory for artifacts.
+    pub artifacts_root: PathBuf,
 }
 
 impl PatchProcessor {
@@ -194,163 +180,86 @@ impl PatchProcessor {
         Ok(report)
     }
 
-    async fn build(&self, patch: &Path, artifacts_root: &Path) -> io::Result<ScenarioReport> {
-        let build_dir = artifacts_root.join("build");
-        prepare_dir(&build_dir).await?;
-
-        self.run_scenario(
-            patch,
-            Image::Raw(&self.base_image),
-            &build_dir,
-            &self.run_config.build,
-        )
-        .await
-    }
-
-    async fn spawn_test_workers(
-        self: Arc<Self>,
-        patch: &Path,
-        artifacts_root: &Path,
-        built_image: Option<&Path>,
-    ) -> io::Result<Vec<TestWorker>> {
-        let tests_dir = artifacts_root.join("tests");
-        prepare_dir(&tests_dir).await?;
-
-        let handles = self
-            .run_config
-            .tests
-            .keys()
-            .cloned()
-            .map(|test| {
-                let tester = self.clone();
-                let artifacts = tests_dir.join(&test);
-                let image = built_image.map(Path::to_owned);
-                let patch = patch.to_path_buf();
-
-                task::spawn(async move {
-                    prepare_dir(&artifacts).await?;
-
-                    let base_image = image
-                        .as_ref()
-                        .map(AsRef::as_ref)
-                        .map(Image::Qcow2)
-                        .unwrap_or(Image::Raw(&tester.base_image));
-
-                    let report = tester
-                        .run_scenario(
-                            &patch,
-                            base_image,
-                            &artifacts,
-                            tester.run_config.tests.get(&test).unwrap(),
-                        )
-                        .await?;
-
-                    Ok((test, report))
-                })
-            })
-            .collect();
-
-        Ok(handles)
-    }
-
-    /// Executes the build-and-test process for a single patch.
+    /// Executes the build-and-test process for a single [Patch].
     /// # Arguments
-    /// patch - path to the processed solution.
-    /// artifacts_root - root directory for artifacts from the process.
+    /// patch - the solution to process.
     /// # Returns
     /// A [RunReport] from the process.
-    pub async fn process(
-        self: Arc<Self>,
-        patch: &Path,
-        artifacts_root: &Path,
-    ) -> io::Result<RunReport> {
-        log::info!("Building a test image for patch at {}.", patch.display());
-        let mut res = RunReport {
-            build: self.build(patch, artifacts_root).await?,
-            tests: Default::default(),
-        };
-        if !res.build.success() {
-            log::info!("Build process failed for patch {}.", patch.display());
-            return Ok(res);
-        }
+    pub async fn process(&self, patch: &Patch) -> io::Result<RunReport> {
+        let root = self.artifacts_root.join(patch.id());
+        prepare_dir(root.as_path()).await?;
 
-        log::info!("Spawning test workers for patch {}.", patch.display());
-        let mut handles = self
-            .spawn_test_workers(patch, artifacts_root, res.build.last_image())
+        log::info!(
+            "Building a test image for solution {}.",
+            patch.path().display()
+        );
+        let build_root = root.join("build");
+        prepare_dir(build_root.as_path()).await?;
+
+        let build = self
+            .run_scenario(
+                patch.path(),
+                Image::Raw(self.base_image.as_path()),
+                build_root.as_path(),
+                &self.run_config.build,
+            )
             .await?;
 
-        while let Some(handle) = handles.pop() {
-            match handle.await {
-                Ok(Ok((test, reports))) => {
-                    log::info!(
-                        "Received report from test {} for patch {}.",
-                        test,
-                        patch.display()
-                    );
-                    res.tests.insert(test, reports);
-                }
-                Ok(Err(error)) => {
-                    log::error!(
-                        "An error occurred when running tests for patch {}. Error: {}.",
-                        patch.display(),
-                        error
-                    );
-                    handles.iter().for_each(JoinHandle::abort);
+        let tests = if build.success() {
+            log::info!("Running tests for solution {}.", patch.path().display());
+            let tests_root = root.join("tests");
+            prepare_dir(tests_root.as_path()).await?;
 
-                    return Err(error);
-                }
-                Err(error) => {
-                    log::error!(
-                        "Internal task panicked when running tests for patch {}. Error: {}.",
-                        patch.display(),
-                        error
-                    );
-                    handles.iter().for_each(JoinHandle::abort);
+            let test_image = build
+                .last_image()
+                .map(Image::Qcow2)
+                .unwrap_or(Image::Raw(self.base_image.as_path()));
 
-                    return Err(io::Error::new(io::ErrorKind::Other, error));
+            let mut futs = FuturesUnordered::new();
+            for (test, scenario) in &self.run_config.tests {
+                let test_root = tests_root.join(test);
+                futs.push(async move {
+                    prepare_dir(test_root.as_path()).await?;
+                    let report = self
+                        .run_scenario(patch.path(), test_image, test_root.as_path(), scenario)
+                        .await?;
+                    Ok::<_, io::Error>((test.clone(), report))
+                });
+            }
+
+            let mut tests = HashMap::new();
+            while let Some(result) = futs.next().await {
+                match result {
+                    Ok((test, report)) => {
+                        log::info!(
+                            "Received report from test {} for solution {}.",
+                            test,
+                            patch.path().display()
+                        );
+                        tests.insert(test.clone(), report);
+                    }
+                    Err(error) => {
+                        log::error!(
+                            "An unexpected error occurred when running tests for solution {}. Error: {}.",
+                            patch.path().display(),
+                            error
+                        );
+                        return Err(error);
+                    }
                 }
             }
-        }
 
-        Ok(res)
-    }
-}
+            tests
+        } else {
+            log::info!(
+                "Build process failed for solution {}.",
+                patch.path().display()
+            );
 
-/// A struct for scheduling build-and-test processes.
-#[derive(Clone)]
-pub struct Tester {
-    /// The processor which will be used for scheduling.
-    pub processor: Arc<PatchProcessor>,
-    /// The root directory for the artifacts.
-    pub artifacts_root: PathBuf,
-    /// The channel to which this results will be sent asynchronously.
-    pub reports_sink: UnboundedSender<(Patch, io::Result<RunReport>)>,
-}
+            Default::default()
+        };
 
-impl Tester {
-    /// Schedules a build-and-test process.
-    /// # Arguments
-    /// patch - solution to process.
-    pub async fn schedule(self, patch: Patch) {
-        let artifacts = self.artifacts_root.join(patch.id());
-
-        task::spawn(async move {
-            let res = if let Err(e) = prepare_dir(&artifacts).await {
-                log::error!(
-                    "Failed to prepare the artifacts directory at {} for solution {}. Error: {}.",
-                    artifacts.display(),
-                    patch.id(),
-                    e
-                );
-                Err(e)
-            } else {
-                log::info!("Starting a test run for solution {}.", patch.id());
-                self.processor.process(patch.path(), &artifacts).await
-            };
-
-            log::info!("Test run finished for solution {}.", patch.id());
-            self.reports_sink.send((patch, res)).ok();
-        });
+        Ok(RunReport { build, tests })
     }
 }
 
@@ -358,12 +267,11 @@ impl Tester {
 mod test {
     use super::*;
     use crate::{patch_validator::PatchValidator, test_util::Env};
-    use std::mem;
-    use tokio::{sync::mpsc, time};
+    use tokio::{fs, time};
 
     #[ignore]
     #[tokio::test]
-    async fn tester() {
+    async fn concurrent_tests() {
         let env = Env::read();
 
         let mut validator = PatchValidator::default();
@@ -381,63 +289,47 @@ mod test {
             patches.push(patch);
         }
 
-        let artifacts_root = env.base_path().join("artifacts");
-        fs::create_dir(&artifacts_root)
-            .await
-            .expect("failed to make dir");
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-
-        let tester = Tester {
-            processor: Arc::new(PatchProcessor {
-                spawner: env.spawner(3),
-                builder: env.builder(),
-                base_image: env.base_image().path().into(),
-                run_config: RunConfig {
-                    execution: ExecutorConfig::test(),
-                    build: Scenario {
-                        retries: 0,
-                        steps: vec![vec![Step::TransferPatch {
-                            to: "patch".into(),
-                            mode: 0o777,
+        let processor = PatchProcessor {
+            spawner: env.spawner(3),
+            builder: env.builder(),
+            base_image: env.base_image().path().into(),
+            run_config: RunConfig {
+                execution: ExecutorConfig::test(),
+                build: Scenario {
+                    retries: 0,
+                    steps: vec![vec![Step::TransferPatch {
+                        to: "patch".into(),
+                        mode: 0o777,
+                        timeout: Duration::from_secs(1),
+                    }]],
+                },
+                tests: HashMap::from([(
+                    "test".into(),
+                    Scenario {
+                        retries: 1,
+                        steps: vec![vec![Step::Action {
+                            action: SshAction::Exec {
+                                cmd: "./patch".into(),
+                            },
                             timeout: Duration::from_secs(1),
                         }]],
                     },
-                    tests: [(
-                        "test".into(),
-                        Scenario {
-                            retries: 1,
-                            steps: vec![vec![Step::Action {
-                                action: SshAction::Exec {
-                                    cmd: "./patch".into(),
-                                },
-                                timeout: Duration::from_secs(1),
-                            }]],
-                        },
-                    )]
-                    .into_iter()
-                    .collect(),
-                },
-            }),
-            artifacts_root,
-            reports_sink: tx,
+                )]),
+            },
+            artifacts_root: env.base_path().join("artifacts"),
         };
 
-        for patch in patches {
-            tester.clone().schedule(patch).await;
+        let proc = &processor;
+        let futs = FuturesUnordered::new();
+        for patch in &patches {
+            futs.push(async move {
+                let report = proc.process(patch).await.expect("testing failed");
+                (patch.id(), report)
+            });
         }
-
-        mem::drop(tester);
-
-        let reports = time::timeout(Duration::from_secs(180), async move {
-            let mut reports = HashMap::new();
-            while let Some((patch, result)) = rx.recv().await {
-                reports.insert(patch.id().to_string(), result.expect("testing failed"));
-            }
-            reports
-        })
-        .await
-        .expect("timeout");
+        let reports = time::timeout(Duration::from_secs(180), futs.collect::<HashMap<_, _>>())
+            .await
+            .expect("timeout");
 
         assert_eq!(reports.len(), 3);
 
