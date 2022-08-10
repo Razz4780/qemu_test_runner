@@ -23,35 +23,37 @@ use tokio_stream::wrappers::LinesStream;
 
 #[derive(Parser, Debug)]
 struct Args {
-    #[clap(long, value_parser)]
+    #[clap(long)]
     /// Test suite configuration file.
     suite: PathBuf,
-    #[clap(long, value_parser, default_value_t = 1)]
+    #[clap(long, default_value_t = 1)]
     /// Maximal count of concurrent QEMU processes running.
     concurrency: usize,
-    #[clap(long, value_parser, default_value = "qemu-system-x86_64")]
+    #[clap(long, default_value = "qemu-system-x86_64")]
     /// Command used to spawn new QEMU processes.
     qemu_system: OsString,
-    #[clap(long, value_parser, default_value_t = 1024)]
+    #[clap(long, default_value_t = 1024)]
     /// Memory limit for a QEMU process (megabytes).
     qemu_memory: u16,
-    #[clap(long, value_parser, default_value_t = true)]
+    #[clap(long, default_value_t = true)]
     /// Whether to enable KVM for QEMU processes.
     qemu_enable_kvm: bool,
-    #[clap(long, value_parser, default_value_t = true)]
+    #[clap(long, default_value_t = true)]
     /// Whether to turn off the irqchip for QEMU processes.
     qemu_irqchip_off: bool,
-    #[clap(long, value_parser, default_value = "qemu-img")]
+    #[clap(long, default_value = "qemu-img")]
     /// Command used to create new qcow2 images.
     qemu_img: OsString,
-    #[clap(long, value_parser)]
+    #[clap(long)]
     /// Base QEMU image (raw).
     base_image: PathBuf,
-    #[clap(long, value_parser)]
+    #[clap(long)]
     /// Output directory for artifacts (qcow2 images).
+    /// If omitted, artifacts will be saved in a temporary directory.
     artifacts: Option<PathBuf>,
-    #[clap(long, value_parser)]
+    #[clap(long)]
     /// Output directory for detailed run reports.
+    /// If omitted, reports will not be generated.
     reports: Option<PathBuf>,
 }
 
