@@ -28,8 +28,6 @@ pub enum Step {
     TransferPatch {
         /// Path to the destination file on the guest machine.
         to: PathBuf,
-        /// Permissions of the destination file one the guest machine.
-        mode: i32,
         /// Timeout for this transfer.
         timeout: Duration,
     },
@@ -39,10 +37,9 @@ impl Step {
     fn action(&self, patch: &Path) -> SshAction {
         match self {
             Self::Action { action, .. } => action.clone(),
-            Self::TransferPatch { to, mode, .. } => SshAction::Send {
+            Self::TransferPatch { to, .. } => SshAction::Send {
                 from: patch.to_path_buf(),
                 to: to.clone(),
-                mode: *mode,
             },
         }
     }
@@ -299,7 +296,6 @@ mod test {
                     retries: 0,
                     steps: vec![vec![Step::TransferPatch {
                         to: "patch".into(),
-                        mode: 0o777,
                         timeout: Duration::from_secs(1),
                     }]],
                 },

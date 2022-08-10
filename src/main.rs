@@ -151,8 +151,7 @@ impl LineProcessor {
 
     async fn save_report(&self, patch: &Patch, report: &RunReport) -> Result<()> {
         if let Some(dir) = self.reports_dir.as_ref() {
-            let mut buf = Vec::new();
-            serde_yaml::to_writer(&mut buf, report).map_err(|error| {
+            let buf = serde_json::to_vec(report).map_err(|error| {
                 Error::new(
                     ErrorKind::Other,
                     format!("failed to serialize report: {}", error),
@@ -160,7 +159,7 @@ impl LineProcessor {
             })?;
 
             let mut path = dir.join(patch.id());
-            path.set_extension("yaml");
+            path.set_extension("json");
 
             fs::write(&path, &buf[..]).await?;
             log::info!(
