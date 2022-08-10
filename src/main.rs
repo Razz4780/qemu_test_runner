@@ -45,8 +45,8 @@ struct Args {
     /// Command used to create new qcow2 images.
     qemu_img: OsString,
     #[clap(long, value_parser)]
-    /// Base MINIX3 image (raw).
-    minix_base: PathBuf,
+    /// Base QEMU image (raw).
+    base_image: PathBuf,
     #[clap(long, value_parser)]
     /// Output directory for artifacts (qcow2 images).
     artifacts: Option<PathBuf>,
@@ -74,7 +74,7 @@ async fn make_patch_processor(args: Args, artifacts_root: PathBuf) -> PatchProce
     PatchProcessor {
         spawner: QemuSpawner::new(args.concurrency, qemu_config),
         builder: ImageBuilder { cmd: args.qemu_img },
-        base_image: fs::canonicalize(args.minix_base)
+        base_image: fs::canonicalize(args.base_image)
             .await
             .expect("failed to canonicalize the base image path"),
         run_config,
