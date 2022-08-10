@@ -1,3 +1,4 @@
+use futures::{future, TryStreamExt};
 use std::{
     ffi::{OsStr, OsString},
     io,
@@ -11,12 +12,14 @@ use std::{
 };
 use tempfile::TempDir;
 use tokio::{
+    fs,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
     process::{Child, Command},
     sync::{OwnedSemaphorePermit, Semaphore},
     task, time,
 };
+use tokio_stream::wrappers::LinesStream;
 
 /// An image for QEMU process.
 #[derive(Clone, Copy)]
@@ -98,11 +101,30 @@ impl MonitorHandle {
         self.socket_dir.path().join(Self::SOCKET_NAME)
     }
 
+    fn parse_network_info_line(line: &str) -> Option<u16> {
+        let mut chunks = line.split_ascii_whitespace();
+
+        let hostfwd = chunks
+            .next()
+            .map(|p| p.contains("HOST_FORWARD"))
+            .unwrap_or(false);
+        if hostfwd {
+            let src_port = chunks.nth(2).map(u16::from_str).transpose().ok().flatten();
+            let dst_port = chunks.nth(1).map(u16::from_str).transpose().ok().flatten();
+
+            if let (Some(src), Some(22)) = (src_port, dst_port) {
+                return Some(src);
+            }
+        }
+
+        None
+    }
+
     /// Returns the number of the local port forwarded to the port 22 (standard SSH port).
     async fn ssh_port(&self) -> io::Result<u16> {
         let mut stream = {
             let socket = self.socket();
-            while !socket.exists() {
+            while fs::metadata(&socket).await.is_err() {
                 time::sleep(Duration::from_millis(100)).await;
             }
             UnixStream::connect(socket).await?
@@ -112,31 +134,15 @@ impl MonitorHandle {
         stream.flush().await?;
         stream.shutdown().await?;
 
-        let mut buffered = BufReader::new(stream);
-        let mut line = String::with_capacity(1024);
-
-        while buffered.read_line(&mut line).await? > 0 {
-            let mut chunks = line.split_ascii_whitespace();
-            let hostfwd = chunks
-                .next()
-                .map(|p| p.contains("HOST_FORWARD"))
-                .unwrap_or(false);
-            if hostfwd {
-                let src_port = chunks.nth(2).map(u16::from_str).transpose().ok().flatten();
-                let dst_port = chunks.nth(1).map(u16::from_str).transpose().ok().flatten();
-
-                if let (Some(src), Some(22)) = (src_port, dst_port) {
-                    return Ok(src);
-                }
-            }
-
-            line.clear();
-        }
-
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            "no SSH port forward found in network info received from the QEMU monitor",
-        ))
+        let stream = LinesStream::new(BufReader::new(stream).lines())
+            .try_filter_map(|line| future::ready(Ok(Self::parse_network_info_line(&line))));
+        tokio::pin!(stream);
+        stream.try_next().await?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                "no SSH port forward found in network info received from the QEMU monitor",
+            )
+        })
     }
 }
 
