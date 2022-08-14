@@ -120,8 +120,8 @@ Disclaimer - this example is not a valid JSON, as JSON is a data-only format and
 }
 ```
 
-# Tests
-A subset of tests can by run with a simple command:
+# Testing this program
+A subset of tests for this program can be run with a simple command:
 ```
 cargo test
 ```
@@ -131,7 +131,7 @@ However, some tests are ignored by default. Running them requires setting some e
 3. `TEST_BUILD_CMD` - command to used to create a copy-on-write image (for example `qemu-img`).
 4. `TEST_ENABLE_KVM` - whether to use KVM in tests.
 
-Those tests can by run with a command:
+Those tests can be run with a command:
 ```
 cargo test -- --ignored
 ```
