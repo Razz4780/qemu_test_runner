@@ -1,5 +1,6 @@
 use serde::{Serialize, Serializer};
 use std::{
+    fmt::{self, Debug, Formatter},
     io::{self, ErrorKind},
     path::Path,
 };
@@ -29,7 +30,7 @@ pub async fn prepare_dir(path: &Path) -> io::Result<()> {
 }
 
 /// A result of running an [ssh::SshAction].
-#[derive(Serialize, Debug)]
+#[derive(Serialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Output {
     /// The action finished and its output was collected.
@@ -49,8 +50,6 @@ pub enum Output {
         /// Stderr of the process.
         stderr: Vec<u8>,
     },
-    /// The action timed out.
-    Timeout,
     /// An SSH error occurred when executing the action.
     Error {
         #[serde(serialize_with = "serialize_io_error")]
@@ -70,7 +69,6 @@ impl Output {
     pub fn stdout(&self) -> Option<&[u8]> {
         match self {
             Self::Finished { stdout, .. } => Some(&stdout[..]),
-            Self::Timeout => None,
             Self::Error { .. } => None,
         }
     }
@@ -80,9 +78,27 @@ impl Output {
     pub fn stderr(&self) -> Option<&[u8]> {
         match self {
             Self::Finished { stderr, .. } => Some(&stderr[..]),
-            Self::Timeout => None,
             Self::Error { .. } => None,
         }
+    }
+}
+
+impl Debug for Output {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut s = f.debug_struct("Output");
+        match self {
+            Self::Finished {
+                exit_code,
+                stdout,
+                stderr,
+            } => s
+                .field("exit_code", exit_code)
+                .field("stdout", &String::from_utf8_lossy(stdout))
+                .field("stderr", &String::from_utf8_lossy(stderr)),
+            Self::Error { error } => s.field("error", error),
+        };
+
+        s.finish()
     }
 }
 
