@@ -61,7 +61,7 @@ mod defaults {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum StepConfig {
     /// File transfer from host to guest over SSH.
-    /// Destination file will have TODO
+    /// Destination file will have permissions set to 0o777.
     FileTransfer {
         /// Path to the source file on the host machine.
         from: PathBuf,

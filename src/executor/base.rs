@@ -85,7 +85,9 @@ impl<'a> BaseExecutor<'a> {
 
         let output = match res {
             Ok(res) => res?,
-            Err(_) => Output::Timeout,
+            Err(_) => Output::Error {
+                error: io::Error::new(io::ErrorKind::TimedOut, "action timed out"),
+            },
         };
         let success = output.success();
 
