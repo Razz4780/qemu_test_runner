@@ -69,7 +69,7 @@ Step configuration is a JSON object containing:
 2. `timeout_ms` - number, time limit for executing this step (milliseconds). Not required, defaults to the `step_timeout_ms` value from the suite configuration.
 3. `command` - string, a command to execute over SSH. Exiting with a non-zero code means failure. Only for the `command` type.
 4. `from` - string, path (absolute or relative to the parent directory of the suite file) to the local file to send over SSH. Only for the `file_transfer` types.
-5. `to` - string, path (absolute or relative to the parent directory of the suite file) to the destination file on the guest system. Only for the `file_transfer` and `patch_transfer` types. The destination file will have permissions set to `0o777`.
+5. `to` - string, path (absolute or relative to the home directory) to the destination file on the guest system. Only for the `file_transfer` and `patch_transfer` types. The destination file will have permissions set to `0o777`.
 
 ## Example build scenario
 Disclaimer - this example is not a valid JSON, as JSON is a data-only format and does not allow comments. Here comments begin with `#`.
