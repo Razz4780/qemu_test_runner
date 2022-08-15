@@ -74,27 +74,23 @@ pub struct RunConfig {
 
 /// A report from a single [Scenario].
 #[derive(Default, Serialize)]
-pub struct ScenarioReport {
-    /// Images used for all attempts.
-    images: Vec<PathBuf>,
-    /// Reports from all attempts.
-    attempts: Vec<Vec<ExecutorReport>>,
-}
+pub struct ScenarioReport(Vec<Vec<ExecutorReport>>);
 
 impl ScenarioReport {
-    fn push_attempt(&mut self, image: PathBuf, attempt: Vec<ExecutorReport>) {
-        self.images.push(image);
-        self.attempts.push(attempt);
+    fn push_attempt(&mut self, attempt: Vec<ExecutorReport>) {
+        self.0.push(attempt);
     }
 
     fn last_image(&self) -> Option<&Path> {
-        self.images.last().map(AsRef::as_ref)
+        let image = self.0.last()?.last()?.image();
+
+        Some(image)
     }
 
     /// # Returns
     /// Whether the scenario was successful.
     pub fn success(&self) -> bool {
-        self.attempts
+        self.0
             .last()
             .map(|reports| reports.iter().all(ExecutorReport::success))
             .unwrap_or(true)
@@ -139,14 +135,22 @@ pub struct PatchProcessor {
 impl PatchProcessor {
     async fn run_scenario(
         &self,
-        patch: &Path,
+        patch: &Patch,
         base_image: Image<'_>,
         artifacts: &Path,
         scenario: &Scenario,
+        name: &str,
     ) -> io::Result<ScenarioReport> {
         let mut report = ScenarioReport::default();
 
         for i in 0..=scenario.retries {
+            log::info!(
+                "Initializing attempt {} of scenario {} for solution {}.",
+                i + 1,
+                name,
+                patch
+            );
+
             let dst = artifacts.join(format!("attempt_{}.qcow2", i + 1));
             self.builder
                 .create(base_image, Image::Qcow2(dst.as_ref()))
@@ -158,16 +162,22 @@ impl PatchProcessor {
             for phase in &scenario.steps {
                 let iter = phase
                     .iter()
-                    .map(|step| (step.action(patch), step.timeout()));
+                    .map(|step| (step.action(patch.path()), step.timeout()));
 
                 let success = executor.open_stack().await?.run_until_failure(iter).await?;
                 if !success {
+                    log::info!(
+                        "Attempt {} of scenario {} failed for solution {}.",
+                        i + 1,
+                        name,
+                        patch
+                    );
                     break;
                 }
             }
 
             let attempt = executor.finish();
-            report.push_attempt(dst, attempt);
+            report.push_attempt(attempt);
 
             if report.success() {
                 break;
@@ -192,10 +202,11 @@ impl PatchProcessor {
 
         let build = self
             .run_scenario(
-                patch.path(),
+                patch,
                 Image::Raw(self.base_image.as_path()),
                 build_root.as_path(),
                 &self.run_config.build,
+                "build",
             )
             .await?;
 
@@ -215,7 +226,7 @@ impl PatchProcessor {
                 futs.push(async move {
                     prepare_dir(test_root.as_path()).await?;
                     let report = self
-                        .run_scenario(patch.path(), test_image, test_root.as_path(), scenario)
+                        .run_scenario(patch, test_image, test_root.as_path(), scenario, test)
                         .await?;
                     Ok::<_, io::Error>((test.clone(), report))
                 });
@@ -330,12 +341,12 @@ mod test {
         }
 
         assert!(report_0.tests().get("test").unwrap().success());
-        assert_eq!(report_0.tests().get("test").unwrap().attempts.len(), 1);
+        assert_eq!(report_0.tests().get("test").unwrap().0.len(), 1);
 
         assert!(!report_1.tests().get("test").unwrap().success());
-        assert_eq!(report_1.tests().get("test").unwrap().attempts.len(), 2);
+        assert_eq!(report_1.tests().get("test").unwrap().0.len(), 2);
 
         assert!(!report_2.tests().get("test").unwrap().success());
-        assert_eq!(report_2.tests().get("test").unwrap().attempts.len(), 2);
+        assert_eq!(report_2.tests().get("test").unwrap().0.len(), 2);
     }
 }
