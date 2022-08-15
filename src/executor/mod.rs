@@ -71,8 +71,10 @@ impl ActionReport {
 #[derive(Debug, Serialize)]
 pub struct ExecutorReport {
     image: PathBuf,
+    #[serde(rename(serialize = "ssh_connection_ok"))]
     ssh_ok: bool,
     action_reports: Vec<ActionReport>,
+    #[serde(rename(serialize = "qemu_exit_clean"))]
     exit_ok: bool,
 }
 
