@@ -8,6 +8,8 @@ This runner uses UNIX-specific features of the [Tokio](https://tokio.rs/) crate.
 # Dependencies
 This program uses the [ssh2](https://docs.rs/ssh2/latest/ssh2/index.html) crate, which contains Rust bindings to the [libssh2](https://www.libssh2.org/) library. You will need its dev package to compile this runner.
 
+This program creates copy-on-write QEMU images and spawns QEMU processes, so you will need QEMU executables to run it. The program was tested with `qemu-img 6.1.0` and `qemu-system-x86_64 6.1.0`.
+
 # Usage
 The most convenient way to compile it uses [Cargo](https://github.com/rust-lang/cargo), which is by default distributed with Rust.
 ```
